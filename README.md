@@ -24,7 +24,7 @@ document behaves identically in the editor and in the terminal.
 │ NAME       STATUS   ROLES    AGE        ← a real OS shell  │
 │ node-1     Ready    <none>   12d          (live)           │
 ├───────────────────────────────────────────────────────────┤
-│ focus:editor   F2:switch Ctrl-S:save F5:run→reflect …      │
+│ focus:editor  F2:switch Ctrl-S:save F5/Ctrl-R:run→reflect… │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -33,8 +33,8 @@ document behaves identically in the editor and in the terminal.
 ## Features
 
 - **Interactive TUI** — an always-editable Markdown editor on top and a live OS
-  shell on the bottom. Press `F5` to run the whole block from the cursor to the
-  next boundary through the **full LC4RI engine** (AND-chain, variables,
+  shell on the bottom. Press `F5` / `Ctrl-R` to run the whole block from the
+  cursor to the next boundary through the **full LC4RI engine** (AND-chain, variables,
   assertions, parallel, retry, `write:`, `include:`, …); commands run in the
   visible shell and their output streams **back into the document** as an
   editable ` ```output ` block; `Ctrl-S` saves.
@@ -122,10 +122,10 @@ The TUI is a split screen with two panes plus a status bar:
 `F2` (or a mouse click) moves focus between the two panes. `Tab` is left for the
 focused pane — shell completion in the terminal, indentation in the editor.
 
-### Running a block with F5
+### Running a block with F5 / Ctrl-R
 
 Put the cursor anywhere in a block of steps (or at its first line) and press
-**`F5`**. Execution runs **from the cursor down to the next boundary** (a blank
+**`F5`** (or **`Ctrl-R`**). Execution runs **from the cursor down to the next boundary** (a blank
 line, `***` / `---` horizon, or an output fence) as one batch, driving the
 **same LC4RI engine** as headless `run`: the AND-chain, numbered/named variables,
 `assert:`, `[parallel]`, `[retry:]`, `prompt:`, `write:`, `include:`, `# env:`
@@ -134,10 +134,25 @@ and fenced ` ```bash ` / ` ```yaml ` blocks all apply.
 Shell commands run in the visible bottom terminal (a leading `- ` / `1. ` prefix
 is stripped), and their output — together with per-command headers, `---`
 separators and directive markers — streams **back into the document** in
-real-time as a single editable ` ```output ` block placed at the boundary:
+real-time as a single editable ` ```output ` block placed at the boundary.
+
+Each command is sent to the shell as a [bracketed paste][bp] so the whole
+(possibly multi-line) command runs as one unit. That keeps the shell's prompt,
+input echo and the internal capture wrapper out of the captured text — the
+` ```output ` block holds **only the command's real stdout/stderr**, never a
+stray ` printf … ` wrapper line. (Modern POSIX shells and PowerShell/PSReadLine
+honour bracketed paste; if a shell ignores it, any leaked wrapper line is
+stripped as a fallback.)
+
+[bp]: https://en.wikipedia.org/wiki/Bracketed-paste
+
+Once a block has been run, its **first line is flagged with two leading spaces
+and drawn in green**, so on the narrow TUI screen you can tell at a glance how
+far down the document you've executed (every line beginning with two spaces is
+highlighted):
 
 ````markdown
-1. hostname → {host}
+  1. hostname → {host}          ← two leading spaces, drawn green = already run
 - echo deploying to {host}
 - kubectl get nodes
 
@@ -154,8 +169,13 @@ node-1     Ready    <none>   12d
 ```
 ````
 
-Re-running the same block replaces its previous ` ```output ` block in place, and
-focus stays on the cursor line.
+Re-running the same block replaces its previous ` ```output ` block in place and
+clears the two-space marker for the run (so the command still parses), then
+re-flags it; focus stays on the cursor line. Two leading spaces are used rather
+than a visible glyph like `* ` (a bullet list item) or a leading tab (an
+indented code block), either of which would change how the line renders as
+Markdown; two spaces leave the command text untouched. If you `Ctrl-S` save, the
+markers are written to the file along with the captured output.
 
 Because output is written into the buffer, the document **is** modified in the
 TUI — use `Ctrl-S` to persist it (or just don't save to discard the captured
@@ -173,7 +193,8 @@ output). Headless `run` never touches the source file.
 | `F2` | Switch focus: editor ⇄ terminal |
 | `Tab` | Passes through to the focused pane (shell completion / editor indent) |
 | `Ctrl-S` | Save the document to disk (any time) |
-| `F5` | Run the block from the cursor to the next boundary; stream output back into the doc |
+| `F5` / `Ctrl-R` | Run the block from the cursor to the next boundary; stream output back into the doc and flag the block's first line with two leading spaces (drawn green) as executed. `Ctrl-R` is consumed only while the editor is focused, so the shell keeps `Ctrl-R` for reverse history search |
+| `Ctrl-Enter` | Also runs the block, on terminals that report the modifier (iTerm2 / kitty / …); a plain `Enter` still inserts a newline |
 | `F6` / `F7` | Shrink / grow the terminal pane (widen / narrow the editor) |
 | mouse click | Focus a pane |
 | `F1` | Help overlay (dismiss with `Esc` or `F1`) |
@@ -297,8 +318,10 @@ info string (or an auto-generated name if omitted).
 
 ## Configuration
 
-`code-lc4ri` reads `~/.code-lc4ri/config.json` (the same file the VS Code
-extension uses). All keys are optional.
+`code-lc4ri` reads `~/.go-lc4ri/config.json` — its own file, kept separate from
+the VS Code extension's `~/.code-lc4ri`. On first run, if the file is missing it
+is auto-generated under `~/.go-lc4ri/` populated with the defaults below, ready
+to edit. All keys are optional.
 
 ```jsonc
 {
@@ -353,7 +376,7 @@ make clean
 | File | Role |
 |---|---|
 | `parser.go` | Runbook grammar (lists, numbered vars, directives, fences) |
-| `config.go` | `~/.code-lc4ri/config.json` loading |
+| `config.go` | `~/.go-lc4ri/config.json` loading + first-run auto-generation |
 | `engine.go` | Execution engine (AND-chain, parallel, retry, streaming, security) |
 | `tui.go` | tview / tcell terminal UI |
 | `headless.go` | `run` subcommand + report export |

@@ -1,15 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
 )
 
-// Config mirrors LC4RIConfig from extension.ts. The CLI reads the same legacy
-// ~/.code-lc4ri/config.json file the VS Code extension falls back to, so a
-// single configuration drives both front-ends.
+// Config mirrors LC4RIConfig from extension.ts. This CLI keeps its own
+// configuration under ~/.go-lc4ri/config.json — deliberately separate from the
+// VS Code extension's ~/.code-lc4ri so the two front-ends never share state.
 type Config struct {
 	Timeout           int               `json:"timeout"`
 	Profiles          map[string]string `json:"profiles"`
@@ -39,25 +40,58 @@ func DefaultConfig() Config {
 	}
 }
 
-// legacyConfigPath returns the path of ~/.code-lc4ri/config.json.
-func legacyConfigPath() string {
+// configDir returns ~/.go-lc4ri, this CLI's own configuration directory.
+func configDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
-	return filepath.Join(home, ".code-lc4ri", "config.json")
+	return filepath.Join(home, ".go-lc4ri")
 }
 
-// LoadConfig merges the legacy config file (if present) onto the defaults.
-// A malformed file is ignored rather than fatal, matching the extension.
+// configPath returns the path of ~/.go-lc4ri/config.json.
+func configPath() string {
+	dir := configDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "config.json")
+}
+
+// writeDefaultConfig materialises ~/.go-lc4ri/config.json with the built-in
+// defaults so a fresh install ships a complete, self-documenting file to edit.
+// Best effort: any error leaves the in-memory defaults in force.
+func writeDefaultConfig(path string) {
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false) // keep regex metacharacters (& < >) readable
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(DefaultConfig()); err != nil {
+		return
+	}
+	_ = os.WriteFile(path, buf.Bytes(), 0o644)
+}
+
+// LoadConfig merges ~/.go-lc4ri/config.json (if present) onto the defaults,
+// auto-generating it on first run when it is missing. A malformed file is
+// ignored rather than fatal.
 func LoadConfig() Config {
 	cfg := DefaultConfig()
-	p := legacyConfigPath()
+	p := configPath()
 	if p == "" {
 		return cfg
 	}
 	data, err := os.ReadFile(p)
 	if err != nil {
+		if os.IsNotExist(err) {
+			writeDefaultConfig(p) // first run: leave a template under ~/.go-lc4ri/
+		}
 		return cfg
 	}
 	var raw struct {

@@ -20,7 +20,7 @@ type tui struct {
 	app    *tview.Application
 	pages  *tview.Pages
 	body   *tview.Flex
-	editor *tview.TextArea
+	editor *markedEditor
 	term   *TermView
 	status *tview.TextView
 
@@ -71,6 +71,26 @@ var reMarkerTail = regexp.MustCompile(`^EC=(-?\d+)(?:;PWD=(.*))?$`)
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>]`)
 
+// dropSentinelLines removes any captured line carrying the wrapper sentinel
+// (the echoed begin/end markers and the `__lc4ri_ec=…; printf …` closing line).
+// Bracketed paste normally keeps these out of the stream entirely; this is the
+// fallback for shells that ignore bracketed paste and echo the wrapper inline,
+// so a stray wrapper line never leaks into the ```output block.
+func dropSentinelLines(s string) string {
+	if !strings.Contains(s, termHideSentinel) {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	kept := lines[:0]
+	for _, ln := range lines {
+		if strings.Contains(ln, termHideSentinel) {
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // stripCapture removes ANSI control sequences and normalises line endings.
 func stripCapture(s string) string {
 	s = ansiRe.ReplaceAllString(s, "")
@@ -84,6 +104,41 @@ const (
 	minTermWeight = 1
 	maxTermWeight = 20
 )
+
+// markedEditor is the Markdown editor with one extra behaviour: after the
+// underlying TextArea draws, any visible line beginning with doneMarker — two
+// leading spaces, the flag an executed block's first line carries — is
+// recoloured in executedStyle, so finished steps are unmistakable on the
+// cramped TUI screen. TextArea has no per-line styling
+// API, so we overlay the colour directly on the screen cells. Wrapping is off
+// (see build), so each screen row maps 1:1 to a document line at rowOffset+row.
+type markedEditor struct {
+	*tview.TextArea
+}
+
+func (m *markedEditor) Draw(screen tcell.Screen) {
+	m.TextArea.Draw(screen)
+
+	x, y, width, height := m.GetInnerRect()
+	if width <= 0 || height <= 0 {
+		return
+	}
+	rowOffset, _ := m.GetOffset()
+	lines := strings.Split(m.GetText(), "\n")
+	for row := 0; row < height; row++ {
+		li := rowOffset + row
+		if li < 0 || li >= len(lines) {
+			continue
+		}
+		if !strings.HasPrefix(lines[li], doneMarker) {
+			continue
+		}
+		for col := 0; col < width; col++ {
+			mainc, combc, _, _ := screen.GetContent(x+col, y+row)
+			screen.SetContent(x+col, y+row, mainc, combc, executedStyle)
+		}
+	}
+}
 
 // runTUI loads the document (creating an empty buffer if it does not yet exist)
 // and starts the interactive application.
@@ -135,7 +190,7 @@ func (t *tui) build(content string) error {
 	if t.cwd == "" {
 		t.cwd = t.dir // commands start in the runbook's directory
 	}
-	t.editor = tview.NewTextArea()
+	t.editor = &markedEditor{TextArea: tview.NewTextArea()}
 	t.editor.SetWrap(false)
 	t.editor.SetText(content, false)
 	t.editor.SetBorder(true).SetTitle(t.docTitle())
@@ -215,6 +270,22 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	case tcell.KeyF5:
 		t.runFromEditor()
 		return nil
+	case tcell.KeyCtrlR:
+		// Easy run shortcut. Consumed only while the editor is focused so the
+		// embedded shell keeps Ctrl-R (reverse history search) for itself.
+		if !t.focusTerm {
+			t.runFromEditor()
+			return nil
+		}
+	case tcell.KeyEnter:
+		// Ctrl-Enter also runs, for terminals that report the modifier (iTerm2,
+		// kitty, …). A plain Enter has no modifier and falls through to the
+		// editor as a newline; on terminals that can't distinguish the two this
+		// simply never fires, and F5 / Ctrl-R remain.
+		if ev.Modifiers()&tcell.ModCtrl != 0 && !t.focusTerm {
+			t.runFromEditor()
+			return nil
+		}
 	case tcell.KeyF6:
 		// shrink terminal / widen Markdown
 		t.resizeTerm(-1)
@@ -312,11 +383,26 @@ func (t *tui) runFromEditor() {
 		row = len(lines) - 1
 	}
 
+	// The block's first line may carry a done-marker from a previous run; clear
+	// it so the parser and boundary detection see the real command. (Only first
+	// lines are ever marked, and blocks are boundary-separated, so a single strip
+	// here is enough — markers on other, already-run blocks are left untouched.)
+	if mi := firstNonBlank(lines, row, len(lines)); mi >= 0 {
+		lines[mi] = stripDoneMarker(lines[mi])
+	}
+
 	// The output block goes at the block boundary; drop any stale block there.
 	insertAt := FindBlockBoundary(lines, row, DefaultIndentSpaces)
 	lines, insertAt = removeOutputBlockAt(lines, insertAt)
 	pre := append([]string{}, lines[:insertAt]...)
 	post := append([]string{}, lines[insertAt:]...)
+
+	// Flag the block's first line as executed so progress is visible in the
+	// narrow TUI. The engine still runs the unmarked `lines`; only the displayed
+	// document (via pre) carries the marker.
+	if mi := firstNonBlank(pre, row, len(pre)); mi >= 0 {
+		pre[mi] = addDoneMarker(pre[mi])
+	}
 
 	sess := &runSession{pre: pre, post: post, row: row}
 	idle := time.Duration(t.cfg.Timeout) * time.Millisecond
@@ -404,7 +490,15 @@ func (t *tui) execInTerminal(cmd string) ExecResult {
 	})
 	t.capMu.Unlock()
 
-	t.term.SendString(wrapped + "\r")
+	// Send the wrapped command as a bracketed paste (ESC [200~ … ESC [201~) so
+	// the shell takes the whole multi-line buffer as one unit and runs it on the
+	// trailing Enter — instead of accepting and echoing it line by line. That
+	// keeps the shell's per-line prompt + input echo (including the closing
+	// `__lc4ri_ec=…; printf …` wrapper) out of the captured stream, so only the
+	// real command output lands between the begin/end markers. Modern posix
+	// shells and PowerShell (PSReadLine) honour bracketed paste; the markers are
+	// ignored harmlessly otherwise, and dropSentinelLines is the fallback net.
+	t.term.SendString("\x1b[200~" + wrapped + "\x1b[201~\r")
 	return <-ch
 }
 
@@ -490,6 +584,7 @@ func (t *tui) finishCommand(id string, timedOut bool) {
 	if timedOut {
 		code = -1
 	}
+	out = dropSentinelLines(out)
 	out = strings.TrimRight(out, "\n")
 	if t.sess != nil {
 		t.sess.committed.WriteString(out)
@@ -561,6 +656,7 @@ func (t *tui) renderDoc() {
 	pre, post, row := t.sess.pre, t.sess.post, t.sess.row
 	t.capMu.Unlock()
 
+	full = dropSentinelLines(full)
 	t.applyDoc(pre, buildOutputBlock(strings.TrimRight(full, "\n")), post, row)
 }
 
@@ -652,6 +748,49 @@ func (t *tui) applyDoc(pre, block, post []string, row int) {
 		top = 0
 	}
 	t.editor.SetOffset(top, 0)
+}
+
+// doneMarker is prepended to the first line of a block once it has been run
+// from the editor (F5). It makes run progress visible at a glance on the narrow
+// TUI screen: marked lines are drawn in executedStyle (see markedEditor.Draw).
+// Two leading spaces are used rather than a visible glyph like '* ' or a tab:
+// a bullet alters how the line renders as Markdown and a leading tab makes it an
+// indented code block, whereas two spaces leave the command text untouched. It
+// is stripped again before a re-run so the underlying command still parses.
+const doneMarker = "  "
+
+// executedStyle colours lines that carry the doneMarker so executed steps stand
+// out from pending ones.
+var executedStyle = tcell.StyleDefault.Foreground(tcell.ColorLimeGreen).Bold(true)
+
+// addDoneMarker flags line as executed (idempotent).
+func addDoneMarker(line string) string {
+	if strings.HasPrefix(line, doneMarker) {
+		return line
+	}
+	return doneMarker + line
+}
+
+// stripDoneMarker removes a flag previously added by addDoneMarker.
+func stripDoneMarker(line string) string {
+	return strings.TrimPrefix(line, doneMarker)
+}
+
+// firstNonBlank returns the index of the first non-blank line in lines[from:to),
+// or -1 if there is none. It is where the executed-flag goes / is cleared.
+func firstNonBlank(lines []string, from, to int) int {
+	if from < 0 {
+		from = 0
+	}
+	if to > len(lines) {
+		to = len(lines)
+	}
+	for i := from; i < to; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			return i
+		}
+	}
+	return -1
 }
 
 // cleanCommandLine strips a Markdown list ("- ") or numbered ("1. ") prefix.
@@ -761,7 +900,7 @@ func (t *tui) refreshStatus() {
 		state += " [yellow]running…[-]"
 	}
 	t.status.SetText(fmt.Sprintf(
-		" focus:%s%s   [grey]F2[-]:switch [grey]Ctrl-S[-]:save [grey]F5[-]:run→reflect [grey]F6/F7[-]:resize [grey]F1[-]:help [grey]F10[-]:quit",
+		" focus:%s%s   [grey]F2[-]:switch [grey]Ctrl-S[-]:save [grey]F5/Ctrl-R[-]:run→reflect [grey]F6/F7[-]:resize [grey]F1[-]:help [grey]F10[-]:quit",
 		focus, state))
 }
 
@@ -814,12 +953,18 @@ func (t *tui) showHelp() {
   [aqua::b]Editor (top)[-:-:-]
     always editable — type Markdown freely
     [yellow]Ctrl-S[-]       save to file (any time)
-    [yellow]F5[-]           run the block from the cursor to the next
+    [yellow]F5[-] / [yellow]Ctrl-R[-]  run the block from the cursor to the next
                   boundary (blank line / *** / output block); all
                   commands and directives (write:, prompt:, assert:,
                   [retry], [parallel], include:, # env:, 1. vars,
                   ` + "```bash / ```yaml" + ` blocks) run in order, their
-                  output streaming back as a ` + "```output" + ` block
+                  output streaming back as a ` + "```output" + ` block.
+                  The block's first line is flagged with two leading
+                  spaces and drawn [green]green[-] once run, so you can see
+                  how far you've executed; it is cleared automatically
+                  if you re-run that block.
+                  ([yellow]Ctrl-Enter[-] also runs, on terminals that
+                  report the modifier — iTerm2 / kitty / …)
     (Tab inserts a tab / triggers indentation as usual)
 
   [aqua::b]Terminal (bottom)[-:-:-]
@@ -831,6 +976,6 @@ func (t *tui) showHelp() {
     [yellow]F10[-]          quit
 `)
 	t.overlay = "help"
-	t.pages.AddPage("help", t.modalWrap(help, 64, 24), true, true)
+	t.pages.AddPage("help", t.modalWrap(help, 64, 26), true, true)
 	t.app.SetFocus(help)
 }

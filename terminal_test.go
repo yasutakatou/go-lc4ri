@@ -394,6 +394,60 @@ func TestRunFromEditorFencedBash(t *testing.T) {
 	t.Fatalf("fenced bash output incomplete; editor:\n%s", last)
 }
 
+// TestCaptureIsClean drives a command through execInTerminal and verifies the
+// captured output contains only the command's real stdout — none of the shell's
+// prompt/input echo, and none of the begin/end markers or the `__lc4ri_ec=…;
+// printf …` closing wrapper that used to leak onto the last line of the output
+// block. Bracketed paste keeps that noise out of the stream.
+func TestCaptureIsClean(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix-shell capture test")
+	}
+	app := tview.NewApplication()
+	sc := tcell.NewSimulationScreen("UTF-8")
+	if err := sc.Init(); err != nil {
+		t.Fatal(err)
+	}
+	sc.SetSize(100, 40)
+	app.SetScreen(sc)
+
+	tu := &tui{app: app, cfg: LoadConfig(), dir: ".", termWeight: 8, cwd: "."}
+	tv, err := NewTermView(app, ".", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tu.term = tv
+	tu.term.onData = tu.onTermData
+	tu.term.Start()
+	app.SetRoot(tv, true)
+	go func() { _ = app.Run() }()
+	defer func() { app.Stop(); tv.Close() }()
+	time.Sleep(600 * time.Millisecond)
+
+	tu.capIdle = 2 * time.Second
+	done := make(chan ExecResult, 1)
+	go func() { done <- tu.execInTerminal("echo clean_aaa\necho clean_bbb") }()
+	var res ExecResult
+	select {
+	case res = <-done:
+	case <-time.After(8 * time.Second):
+		t.Fatal("execInTerminal timed out")
+	}
+
+	got := strings.TrimRight(res.Stdout, "\n")
+	if want := "clean_aaa\nclean_bbb"; got != want {
+		t.Errorf("captured output not clean:\n got %q\nwant %q", got, want)
+	}
+	for _, noise := range []string{termHideSentinel, "__lc4ri_ec", "printf", "echo clean_aaa"} {
+		if strings.Contains(res.Stdout, noise) {
+			t.Errorf("captured output leaked %q:\n%q", noise, res.Stdout)
+		}
+	}
+	if res.Code != 0 {
+		t.Errorf("exit code = %d, want 0", res.Code)
+	}
+}
+
 // sync runs fn on the application's main loop and waits for it.
 func onMain(app *tview.Application, fn func()) {
 	done := make(chan struct{})
@@ -423,6 +477,31 @@ func TestWrapCommandHidden(t *testing.T) {
 	// the shell's output), otherwise capture would self-trigger on the echo.
 	if strings.Contains(wrapped, begin) {
 		t.Errorf("wrapper %q contains contiguous begin token %q (echo would false-match)", wrapped, begin)
+	}
+}
+
+// TestDoneMarkerIsSpaces pins the executed-block flag to two leading spaces (so
+// it doesn't alter Markdown rendering the way a bullet or a tab would) and
+// checks the add/strip round-trip, idempotency, and that highlighting keys off
+// the two-space prefix.
+func TestDoneMarkerIsSpaces(t *testing.T) {
+	if doneMarker != "  " {
+		t.Fatalf("doneMarker = %q, want two spaces", doneMarker)
+	}
+	const cmd = "1. hostname → {host}"
+	marked := addDoneMarker(cmd)
+	if !strings.HasPrefix(marked, "  ") {
+		t.Errorf("addDoneMarker(%q) = %q, want two leading spaces", cmd, marked)
+	}
+	if got := addDoneMarker(marked); got != marked {
+		t.Errorf("addDoneMarker not idempotent: %q -> %q", marked, got)
+	}
+	if got := stripDoneMarker(marked); got != cmd {
+		t.Errorf("stripDoneMarker(%q) = %q, want %q", marked, got, cmd)
+	}
+	// The highlight in markedEditor.Draw keys off this same prefix.
+	if !strings.HasPrefix(marked, doneMarker) {
+		t.Errorf("marked line would not be highlighted: %q", marked)
 	}
 }
 
