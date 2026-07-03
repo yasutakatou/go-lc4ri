@@ -38,6 +38,11 @@ document behaves identically in the editor and in the terminal.
   assertions, parallel, retry, `write:`, `include:`, …); commands run in the
   visible shell and their output streams **back into the document** as an
   editable ` ```output ` block; `Ctrl-S` saves.
+- **Text selection** — hold `Shift` while moving the cursor (or `Shift`+click)
+  in the editor to select a range of text, then cut / copy / paste it.
+- **Markdown preview** — `F3` renders the document full-screen as styled,
+  read-only Markdown (headings, bold/italic, lists, quotes, code fences);
+  `Esc` / `F3` returns to the editor.
 - **Headless runner** — `code-lc4ri run` for CI / scripting, sharing the exact
   same engine, with a non-zero exit code on any failure and optional HTML /
   Markdown report export.
@@ -113,6 +118,9 @@ The TUI is a split screen with two panes plus a status bar:
 
 - **Top pane — Markdown editor.** A normal, always-editable text editor holding
   your `.md` document. Type and edit Markdown freely; `Ctrl-S` saves to disk.
+  Hold `Shift` while moving the cursor (arrows, Home/End, word-jumps) or
+  `Shift`+click to select a range of text — `Ctrl-Q` copies it, `Ctrl-X` cuts
+  it, `Ctrl-V` replaces it (or inserts at the cursor if nothing is selected).
 - **Bottom pane — live OS shell.** A real terminal attached to your shell
   (zsh / bash / PowerShell …). When focused it behaves like any terminal —
   keystrokes (incl. `Ctrl-C`) go straight to the shell.
@@ -186,15 +194,26 @@ output). Headless `run` never touches the source file.
 > `[parallel]` groups run sequentially in the TUI (a single visible shell can't
 > interleave captures); headless `run` runs them concurrently.
 
+### Markdown preview with F3
+
+Press **`F3`** to render the current buffer as styled Markdown, full-screen and
+read-only — headings, **bold**/*italic* emphasis, `inline code`, lists,
+block quotes and fenced code blocks each get distinct styling. It is a
+snapshot: editing is blocked while the preview is open. Scroll it with the
+arrow keys / `PgUp` / `PgDn` / `Home` / `End`; press **`Esc`** or **`F3`**
+again to return to the editor exactly where you left it.
+
 ### Keyboard shortcuts
 
 | Key | Action |
 |---|---|
 | `F2` | Switch focus: editor ⇄ terminal |
 | `Tab` | Passes through to the focused pane (shell completion / editor indent) |
+| `Shift`+cursor / `Shift`+click | Select a range of text in the editor (`Ctrl-Q` copy, `Ctrl-X` cut, `Ctrl-V` paste) |
 | `Ctrl-S` | Save the document to disk (any time) |
 | `F5` / `Ctrl-R` | Run the block from the cursor to the next boundary; stream output back into the doc and flag the block's first line with two leading spaces (drawn green) as executed. `Ctrl-R` is consumed only while the editor is focused, so the shell keeps `Ctrl-R` for reverse history search |
 | `Ctrl-Enter` | Also runs the block, on terminals that report the modifier (iTerm2 / kitty / …); a plain `Enter` still inserts a newline |
+| `F3` | Toggle the read-only Markdown preview (dismiss with `Esc` or `F3`) |
 | `F6` / `F7` | Shrink / grow the terminal pane (widen / narrow the editor) |
 | mouse click | Focus a pane |
 | `F1` | Help overlay (dismiss with `Esc` or `F1`) |
@@ -379,6 +398,7 @@ make clean
 | `config.go` | `~/.go-lc4ri/config.json` loading + first-run auto-generation |
 | `engine.go` | Execution engine (AND-chain, parallel, retry, streaming, security) |
 | `tui.go` | tview / tcell terminal UI |
+| `preview.go` | Markdown → styled tview text for the `F3` preview screen |
 | `headless.go` | `run` subcommand + report export |
 | `main.go` | Argument parsing / entry point |
 | `proc_unix.go`, `proc_windows.go` | Process-group termination per OS |

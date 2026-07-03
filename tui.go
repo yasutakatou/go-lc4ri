@@ -254,6 +254,16 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 			}
 			return nil
 		}
+		// The Markdown preview is read-only: everything except the toggle-back
+		// keys passes through so the TextView's own scrolling (arrows, PgUp/Dn,
+		// Home/End) keeps working.
+		if t.overlay == "preview" {
+			if ev.Key() == tcell.KeyEsc || ev.Key() == tcell.KeyF3 {
+				t.closeOverlay()
+				return nil
+			}
+			return ev
+		}
 		return ev
 	}
 
@@ -263,6 +273,9 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		return nil
 	case tcell.KeyF1:
 		t.showHelp()
+		return nil
+	case tcell.KeyF3:
+		t.showPreview()
 		return nil
 	case tcell.KeyCtrlS:
 		t.save()
@@ -900,7 +913,7 @@ func (t *tui) refreshStatus() {
 		state += " [yellow]running…[-]"
 	}
 	t.status.SetText(fmt.Sprintf(
-		" focus:%s%s   [grey]F2[-]:switch [grey]Ctrl-S[-]:save [grey]F5/Ctrl-R[-]:run→reflect [grey]F6/F7[-]:resize [grey]F1[-]:help [grey]F10[-]:quit",
+		" focus:%s%s   [grey]F2[-]:switch [grey]Ctrl-S[-]:save [grey]F5/Ctrl-R[-]:run→reflect [grey]F3[-]:preview [grey]F6/F7[-]:resize [grey]F1[-]:help [grey]F10[-]:quit",
 		focus, state))
 }
 
@@ -936,6 +949,21 @@ func (t *tui) closeOverlay() {
 	}
 }
 
+// showPreview renders the document as read-only, styled Markdown covering the
+// full screen. It is a snapshot of the buffer at the time F3 was pressed —
+// editing is blocked while it is open. Esc or F3 again returns to the editor.
+func (t *tui) showPreview() {
+	if t.overlay != "" {
+		return
+	}
+	preview := tview.NewTextView().SetDynamicColors(true).SetWrap(true)
+	preview.SetBorder(true).SetTitle(" Markdown Preview — read only (Esc / F3 to return) ")
+	preview.SetText(renderMarkdownPreview(t.editor.GetText()))
+	t.overlay = "preview"
+	t.pages.AddPage("preview", preview, true, true)
+	t.app.SetFocus(preview)
+}
+
 func (t *tui) showHelp() {
 	if t.overlay != "" {
 		t.closeOverlay()
@@ -952,6 +980,8 @@ func (t *tui) showHelp() {
 
   [aqua::b]Editor (top)[-:-:-]
     always editable — type Markdown freely
+    [yellow]Shift[-]+cursor / [yellow]Shift[-]+click  select a range of text;
+                  Ctrl-Q copies it, Ctrl-X cuts it, Ctrl-V pastes over it
     [yellow]Ctrl-S[-]       save to file (any time)
     [yellow]F5[-] / [yellow]Ctrl-R[-]  run the block from the cursor to the next
                   boundary (blank line / *** / output block); all
@@ -966,6 +996,10 @@ func (t *tui) showHelp() {
                   ([yellow]Ctrl-Enter[-] also runs, on terminals that
                   report the modifier — iTerm2 / kitty / …)
     (Tab inserts a tab / triggers indentation as usual)
+    [yellow]F3[-]           preview the document as rendered Markdown,
+                  full-screen and read-only (headings, bold/italic,
+                  lists, quotes and code fences are styled); [yellow]Esc[-]
+                  or [yellow]F3[-] again returns to the editor
 
   [aqua::b]Terminal (bottom)[-:-:-]
     a real OS shell — works like any terminal when focused
@@ -973,6 +1007,7 @@ func (t *tui) showHelp() {
 
   [aqua::b]Application[-:-:-]
     [yellow]F1[-]           this help
+    [yellow]F3[-]           Markdown preview (see Editor section)
     [yellow]F10[-]          quit
 `)
 	t.overlay = "help"
