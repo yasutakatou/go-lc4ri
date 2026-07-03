@@ -26,6 +26,7 @@ type tui struct {
 
 	file       string
 	cfg        Config
+	keys       map[string]keySpec // resolved from cfg.Keybindings; see keybindings.go
 	dir        string
 	profile    string
 	dirty      bool
@@ -155,10 +156,18 @@ func runTUI(file, profile string) int {
 	}
 	content := strings.ReplaceAll(string(data), "\r\n", "\n")
 
+	cfg := LoadConfig()
+	keys, err := resolveKeybindings(cfg.Keybindings)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "code-lc4ri: config:", err)
+		return 2
+	}
+
 	t := &tui{
 		app:        tview.NewApplication(),
 		file:       abs,
-		cfg:        LoadConfig(),
+		cfg:        cfg,
+		keys:       keys,
 		dir:        filepath.Dir(abs),
 		profile:    profile,
 		termWeight: 2,
@@ -241,15 +250,16 @@ func (t *tui) docTitle() string {
 	return " " + mark + filepath.Base(t.file) + " — Markdown (Ctrl-S save) "
 }
 
-// onKey handles the global shortcuts. Everything it does not consume falls
-// through to the focused widget (the editor or the terminal).
+// onKey handles the global shortcuts, resolved from cfg.Keybindings (see
+// keybindings.go). Everything it does not consume falls through to the
+// focused widget (the editor or the terminal).
 func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	if t.overlay != "" {
-		// The help overlay is dismissed with Esc / F1. Interactive overlays
-		// (prompt / confirm) own their own keys and dismiss themselves, so let
-		// their events through untouched.
+		// The help overlay is dismissed with Esc / the configured help key.
+		// Interactive overlays (prompt / confirm) own their own keys and
+		// dismiss themselves, so let their events through untouched.
 		if t.overlay == "help" {
-			if ev.Key() == tcell.KeyEsc || ev.Key() == tcell.KeyF1 {
+			if ev.Key() == tcell.KeyEsc || t.keys[actHelp].matches(ev) {
 				t.closeOverlay()
 			}
 			return nil
@@ -258,7 +268,7 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		// keys passes through so the TextView's own scrolling (arrows, PgUp/Dn,
 		// Home/End) keeps working.
 		if t.overlay == "preview" {
-			if ev.Key() == tcell.KeyEsc || ev.Key() == tcell.KeyF3 {
+			if ev.Key() == tcell.KeyEsc || t.keys[actPreview].matches(ev) {
 				t.closeOverlay()
 				return nil
 			}
@@ -267,60 +277,62 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		return ev
 	}
 
-	switch ev.Key() {
-	case tcell.KeyF10:
+	switch {
+	case t.keys[actQuit].matches(ev):
 		t.app.Stop()
 		return nil
-	case tcell.KeyF1:
+	case t.keys[actHelp].matches(ev):
 		t.showHelp()
 		return nil
-	case tcell.KeyF3:
+	case t.keys[actPreview].matches(ev):
 		t.showPreview()
 		return nil
-	case tcell.KeyCtrlS:
+	case t.keys[actSave].matches(ev):
 		t.save()
 		return nil
-	case tcell.KeyF5:
+	case t.keys[actRun].matches(ev):
 		t.runFromEditor()
 		return nil
-	case tcell.KeyCtrlR:
-		// Easy run shortcut. Consumed only while the editor is focused so the
-		// embedded shell keeps Ctrl-R (reverse history search) for itself.
+	case ev.Key() == tcell.KeyCtrlR:
+		// Fixed convenience alias for "run", independent of whatever key the
+		// run action itself is bound to. Consumed only while the editor is
+		// focused so the embedded shell keeps Ctrl-R (reverse history search)
+		// for itself.
 		if !t.focusTerm {
 			t.runFromEditor()
 			return nil
 		}
-	case tcell.KeyEnter:
-		// Ctrl-Enter also runs, for terminals that report the modifier (iTerm2,
-		// kitty, …). A plain Enter has no modifier and falls through to the
-		// editor as a newline; on terminals that can't distinguish the two this
-		// simply never fires, and F5 / Ctrl-R remain.
+	case ev.Key() == tcell.KeyEnter:
+		// Fixed convenience alias: Ctrl-Enter also runs, for terminals that
+		// report the modifier (iTerm2, kitty, …). A plain Enter has no
+		// modifier and falls through to the editor as a newline; on terminals
+		// that can't distinguish the two this simply never fires.
 		if ev.Modifiers()&tcell.ModCtrl != 0 && !t.focusTerm {
 			t.runFromEditor()
 			return nil
 		}
-	case tcell.KeyF6:
+	case t.keys[actResizeShrink].matches(ev):
 		// shrink terminal / widen Markdown
 		t.resizeTerm(-1)
 		return nil
-	case tcell.KeyF7:
+	case t.keys[actResizeGrow].matches(ev):
 		// grow terminal
 		t.resizeTerm(1)
 		return nil
-	case tcell.KeyF2:
+	case t.keys[actFocus].matches(ev):
 		// Focus switch. (Tab is intentionally left for the focused pane: the
 		// terminal needs it for shell completion, the editor for indentation.)
 		t.toggleFocus()
 		return nil
-	case tcell.KeyUp:
-		// Fallback for terminals that deliver Ctrl+Arrow. On macOS these are
-		// usually swallowed by Mission Control / App Exposé, so F6/F7 are the
-		// reliable bindings.
+	case ev.Key() == tcell.KeyUp:
+		// Fixed fallback for terminals that deliver Ctrl+Arrow. On macOS these
+		// are usually swallowed by Mission Control / App Exposé, so the
+		// resizeShrink/resizeGrow bindings are the reliable ones.
 		if ev.Modifiers()&tcell.ModCtrl != 0 {
 			t.resizeTerm(-1)
 			return nil
 		}
-	case tcell.KeyDown:
+	case ev.Key() == tcell.KeyDown:
 		if ev.Modifiers()&tcell.ModCtrl != 0 {
 			t.resizeTerm(1)
 			return nil
@@ -897,6 +909,15 @@ func removeOutputBlockAt(lines []string, at int) ([]string, int) {
 	return out, j
 }
 
+// keyLabel returns the configured key string for action (as written in
+// config.json / the built-in default), or "?" if the action is unknown.
+func (t *tui) keyLabel(action string) string {
+	if ks, ok := t.keys[action]; ok {
+		return ks.label
+	}
+	return "?"
+}
+
 func (t *tui) refreshStatus() {
 	focus := "[aqua]editor[-]"
 	if t.focusTerm {
@@ -913,8 +934,10 @@ func (t *tui) refreshStatus() {
 		state += " [yellow]running…[-]"
 	}
 	t.status.SetText(fmt.Sprintf(
-		" focus:%s%s   [grey]F2[-]:switch [grey]Ctrl-S[-]:save [grey]F5/Ctrl-R[-]:run→reflect [grey]F3[-]:preview [grey]F6/F7[-]:resize [grey]F1[-]:help [grey]F10[-]:quit",
-		focus, state))
+		" focus:%s%s   [grey]%s[-]:switch [grey]%s[-]:save [grey]%s/Ctrl-R[-]:run→reflect [grey]%s[-]:preview [grey]%s/%s[-]:resize [grey]%s[-]:help [grey]%s[-]:quit",
+		focus, state,
+		t.keyLabel(actFocus), t.keyLabel(actSave), t.keyLabel(actRun), t.keyLabel(actPreview),
+		t.keyLabel(actResizeShrink), t.keyLabel(actResizeGrow), t.keyLabel(actHelp), t.keyLabel(actQuit)))
 }
 
 // flash writes a transient message to the status bar (until the next refresh).
@@ -970,11 +993,11 @@ func (t *tui) showHelp() {
 		return
 	}
 	help := tview.NewTextView().SetDynamicColors(true)
-	help.SetBorder(true).SetTitle(" Keyboard Shortcuts (Esc / F1 to close) ")
-	help.SetText(`
+	help.SetBorder(true).SetTitle(" Keyboard Shortcuts (Esc / " + t.keyLabel(actHelp) + " to close) ")
+	tmpl := `
   [aqua::b]Layout[-:-:-]
-    [yellow]F2[-]           switch focus: editor ⇄ terminal
-    [yellow]F6 / F7[-]      shrink / grow the terminal pane
+    [yellow]%FOCUS%[-]           switch focus: editor ⇄ terminal
+    [yellow]%SHRINK% / %GROW%[-]      shrink / grow the terminal pane
                   (Ctrl-↑/↓ also works where the terminal allows it)
     [yellow]mouse click[-]  focus a pane
 
@@ -982,8 +1005,8 @@ func (t *tui) showHelp() {
     always editable — type Markdown freely
     [yellow]Shift[-]+cursor / [yellow]Shift[-]+click  select a range of text;
                   Ctrl-Q copies it, Ctrl-X cuts it, Ctrl-V pastes over it
-    [yellow]Ctrl-S[-]       save to file (any time)
-    [yellow]F5[-] / [yellow]Ctrl-R[-]  run the block from the cursor to the next
+    [yellow]%SAVE%[-]       save to file (any time)
+    [yellow]%RUN%[-] / [yellow]Ctrl-R[-]  run the block from the cursor to the next
                   boundary (blank line / *** / output block); all
                   commands and directives (write:, prompt:, assert:,
                   [retry], [parallel], include:, # env:, 1. vars,
@@ -996,20 +1019,34 @@ func (t *tui) showHelp() {
                   ([yellow]Ctrl-Enter[-] also runs, on terminals that
                   report the modifier — iTerm2 / kitty / …)
     (Tab inserts a tab / triggers indentation as usual)
-    [yellow]F3[-]           preview the document as rendered Markdown,
+    [yellow]%PREVIEW%[-]           preview the document as rendered Markdown,
                   full-screen and read-only (headings, bold/italic,
                   lists, quotes and code fences are styled); [yellow]Esc[-]
-                  or [yellow]F3[-] again returns to the editor
+                  or [yellow]%PREVIEW%[-] again returns to the editor
 
   [aqua::b]Terminal (bottom)[-:-:-]
     a real OS shell — works like any terminal when focused
     keys (incl. Ctrl-C) go to the shell; type 'exit' to quit
 
   [aqua::b]Application[-:-:-]
-    [yellow]F1[-]           this help
-    [yellow]F3[-]           Markdown preview (see Editor section)
-    [yellow]F10[-]          quit
-`)
+    [yellow]%HELP%[-]           this help
+    [yellow]%PREVIEW%[-]           Markdown preview (see Editor section)
+    [yellow]%QUIT%[-]          quit
+
+  Reassign any of these (except Ctrl-R / Ctrl-Enter, which are fixed run
+  aliases) via "keybindings" in ~/.go-lc4ri/config.json.
+`
+	replacer := strings.NewReplacer(
+		"%FOCUS%", t.keyLabel(actFocus),
+		"%SHRINK%", t.keyLabel(actResizeShrink),
+		"%GROW%", t.keyLabel(actResizeGrow),
+		"%SAVE%", t.keyLabel(actSave),
+		"%RUN%", t.keyLabel(actRun),
+		"%PREVIEW%", t.keyLabel(actPreview),
+		"%HELP%", t.keyLabel(actHelp),
+		"%QUIT%", t.keyLabel(actQuit),
+	)
+	help.SetText(replacer.Replace(tmpl))
 	t.overlay = "help"
 	t.pages.AddPage("help", t.modalWrap(help, 64, 26), true, true)
 	t.app.SetFocus(help)

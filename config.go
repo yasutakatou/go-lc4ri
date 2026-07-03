@@ -22,6 +22,7 @@ type Config struct {
 	DenyList          []string          `json:"denyList"`
 	ConfirmDangerous  bool              `json:"confirmDangerous"`
 	Shell             *string           `json:"shell"`
+	Keybindings       map[string]string `json:"keybindings"`
 }
 
 // DefaultConfig returns the built-in defaults (matches DEFAULT_CONFIG).
@@ -37,6 +38,7 @@ func DefaultConfig() Config {
 		DenyList:          []string{},
 		ConfirmDangerous:  true,
 		Shell:             nil,
+		Keybindings:       defaultKeybindings(),
 	}
 }
 
@@ -105,6 +107,7 @@ func LoadConfig() Config {
 		DenyList          []string          `json:"denyList"`
 		ConfirmDangerous  *bool             `json:"confirmDangerous"`
 		Shell             *string           `json:"shell"`
+		Keybindings       map[string]string `json:"keybindings"`
 	}
 	if json.Unmarshal(data, &raw) != nil {
 		return cfg
@@ -138,6 +141,9 @@ func LoadConfig() Config {
 	}
 	if raw.Shell != nil {
 		cfg.Shell = raw.Shell
+	}
+	for action, spec := range raw.Keybindings {
+		cfg.Keybindings[action] = spec
 	}
 	return cfg
 }

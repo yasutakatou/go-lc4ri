@@ -41,8 +41,8 @@ document behaves identically in the editor and in the terminal.
 - **Text selection** — hold `Shift` while moving the cursor (or `Shift`+click)
   in the editor to select a range of text, then cut / copy / paste it.
 - **Markdown preview** — `F3` renders the document full-screen as styled,
-  read-only Markdown (headings, bold/italic, lists, quotes, code fences);
-  `Esc` / `F3` returns to the editor.
+  read-only Markdown (headings, bold/italic, lists, quotes, code fences,
+  tables); `Esc` / `F3` returns to the editor.
 - **Headless runner** — `code-lc4ri run` for CI / scripting, sharing the exact
   same engine, with a non-zero exit code on any failure and optional HTML /
   Markdown report export.
@@ -198,30 +198,38 @@ output). Headless `run` never touches the source file.
 
 Press **`F3`** to render the current buffer as styled Markdown, full-screen and
 read-only — headings, **bold**/*italic* emphasis, `inline code`, lists,
-block quotes and fenced code blocks each get distinct styling. It is a
-snapshot: editing is blocked while the preview is open. Scroll it with the
-arrow keys / `PgUp` / `PgDn` / `Home` / `End`; press **`Esc`** or **`F3`**
-again to return to the editor exactly where you left it.
+block quotes, fenced code blocks and GFM tables each get distinct styling.
+Tables are redrawn as box-drawn grids with a bold header row and honour
+per-column alignment (`:---`, `---:`, `:---:`). It is a snapshot: editing is
+blocked while the preview is open. Scroll it with the arrow keys / `PgUp` /
+`PgDn` / `Home` / `End`; press **`Esc`** or **`F3`** again to return to the
+editor exactly where you left it.
 
 ### Keyboard shortcuts
 
-| Key | Action |
-|---|---|
-| `F2` | Switch focus: editor ⇄ terminal |
-| `Tab` | Passes through to the focused pane (shell completion / editor indent) |
-| `Shift`+cursor / `Shift`+click | Select a range of text in the editor (`Ctrl-Q` copy, `Ctrl-X` cut, `Ctrl-V` paste) |
-| `Ctrl-S` | Save the document to disk (any time) |
-| `F5` / `Ctrl-R` | Run the block from the cursor to the next boundary; stream output back into the doc and flag the block's first line with two leading spaces (drawn green) as executed. `Ctrl-R` is consumed only while the editor is focused, so the shell keeps `Ctrl-R` for reverse history search |
-| `Ctrl-Enter` | Also runs the block, on terminals that report the modifier (iTerm2 / kitty / …); a plain `Enter` still inserts a newline |
-| `F3` | Toggle the read-only Markdown preview (dismiss with `Esc` or `F3`) |
-| `F6` / `F7` | Shrink / grow the terminal pane (widen / narrow the editor) |
-| mouse click | Focus a pane |
-| `F1` | Help overlay (dismiss with `Esc` or `F1`) |
-| `F10` | Quit (or type `exit` in the shell) |
+The keys below are the **defaults**. Every one of them is reassignable via
+`keybindings` in `~/.go-lc4ri/config.json` — see
+[Keybindings](#keybindings) — and the in-app `F1` help overlay / status bar
+always reflect whatever is actually configured, not these defaults.
+
+| Key | Action | `keybindings` action name |
+|---|---|---|
+| `F2` | Switch focus: editor ⇄ terminal | `focus` |
+| `Tab` | Passes through to the focused pane (shell completion / editor indent) | — (not bindable) |
+| `Shift`+cursor / `Shift`+click | Select a range of text in the editor (`Ctrl-Q` copy, `Ctrl-X` cut, `Ctrl-V` paste) | — (not bindable) |
+| `Ctrl-S` | Save the document to disk (any time) | `save` |
+| `F5` / `Ctrl-R` | Run the block from the cursor to the next boundary; stream output back into the doc and flag the block's first line with two leading spaces (drawn green) as executed. `Ctrl-R` is consumed only while the editor is focused, so the shell keeps `Ctrl-R` for reverse history search | `run` (`Ctrl-R` is a fixed alias, always active regardless of how `run` is bound) |
+| `Ctrl-Enter` | Also runs the block, on terminals that report the modifier (iTerm2 / kitty / …); a plain `Enter` still inserts a newline | — (fixed alias for `run`, not bindable) |
+| `F3` | Toggle the read-only Markdown preview (dismiss with `Esc` or `F3`) | `preview` |
+| `F6` / `F7` | Shrink / grow the terminal pane (widen / narrow the editor) | `resizeShrink` / `resizeGrow` |
+| mouse click | Focus a pane | — (not bindable) |
+| `F1` | Help overlay (dismiss with `Esc` or `F1`) | `help` |
+| `F10` | Quit (or type `exit` in the shell) | `quit` |
 
 > On macOS, `Ctrl-↑` / `Ctrl-↓` are reserved by the system (Mission Control /
 > App Exposé), so resize is bound to **`F6` / `F7`**. `Ctrl-↑/↓` still works as a
-> fallback on terminals that deliver those keys to the application.
+> fixed fallback on terminals that deliver those keys to the application,
+> regardless of how `resizeShrink` / `resizeGrow` are configured.
 
 ---
 
@@ -358,13 +366,57 @@ to edit. All keys are optional.
   "dangerousPatterns": [],                // regexes that prompt a confirm modal
   "allowList": [],                        // if non-empty, only matching commands run
   "denyList": [],                         // matching commands never run
-  "confirmDangerous": true                // show the confirm modal in the TUI
+  "confirmDangerous": true,               // show the confirm modal in the TUI
+  "keybindings": {                        // TUI shortcut overrides — see below
+    "quit": "F10",
+    "help": "F1",
+    "preview": "F3",
+    "save": "Ctrl-S",
+    "run": "F5",
+    "focus": "F2",
+    "resizeShrink": "F6",
+    "resizeGrow": "F7"
+  }
 }
 ```
 
 A sensible default `dangerousPatterns` list ships built-in
 (`rm -rf /`, `dd if=`, `mkfs.`, fork bombs, `curl | sh`, Windows `format`/`del`,
 `Remove-Item -Recurse -Force`, …).
+
+### Keybindings
+
+`keybindings` reassigns the TUI's shortcut keys. It only needs the actions
+you want to change — anything omitted keeps its built-in default (the values
+shown above). The in-app `F1` help overlay and the status bar always reflect
+the resolved bindings, not the hardcoded defaults.
+
+| Action | Default | Does |
+|---|---|---|
+| `quit` | `F10` | Quit the TUI |
+| `help` | `F1` | Toggle the help overlay |
+| `preview` | `F3` | Toggle the read-only Markdown preview |
+| `save` | `Ctrl-S` | Save the document to disk |
+| `run` | `F5` | Run the block from the cursor to the next boundary |
+| `focus` | `F2` | Switch focus between the editor and the terminal |
+| `resizeShrink` | `F6` | Shrink the terminal pane |
+| `resizeGrow` | `F7` | Grow the terminal pane |
+
+A key spec is a function key (`F1`–`F12`), a named key (`Esc`, `Enter`, `Tab`,
+`Up`/`Down`/`Left`/`Right`, `Home`/`End`, `PgUp`/`PgDn`, `Backspace`,
+`Delete`), a `Ctrl-` + letter combo (`Ctrl-A`–`Ctrl-Z`), or a single printable
+character. Printable-character bindings intercept that character globally, so
+they will interfere with typing in the editor — function keys and `Ctrl-`
+combos are recommended.
+
+`Ctrl-R` and `Ctrl-Enter` are fixed convenience aliases for `run` and are not
+reassignable; avoid binding another action to them, since that action would
+take priority and shadow the alias.
+
+**Two actions cannot share the same key.** If `keybindings` resolves to a
+duplicate assignment (or names an unknown action, or an unparsable key spec),
+`code-lc4ri` prints an error and exits **before the TUI starts** — it never
+launches with an ambiguous keymap.
 
 ### Notes
 
@@ -396,6 +448,7 @@ make clean
 |---|---|
 | `parser.go` | Runbook grammar (lists, numbered vars, directives, fences) |
 | `config.go` | `~/.go-lc4ri/config.json` loading + first-run auto-generation |
+| `keybindings.go` | Parses/resolves the `keybindings` config into TUI key bindings; validates for duplicates |
 | `engine.go` | Execution engine (AND-chain, parallel, retry, streaming, security) |
 | `tui.go` | tview / tcell terminal UI |
 | `preview.go` | Markdown → styled tview text for the `F3` preview screen |

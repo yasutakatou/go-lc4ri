@@ -18,6 +18,14 @@ import (
 const version = "2.0.0"
 
 func usage() {
+	keys := defaultKeybindings()
+	if cfg := LoadConfig(); cfg.Keybindings != nil {
+		if resolved, err := resolveKeybindings(cfg.Keybindings); err == nil {
+			for action, ks := range resolved {
+				keys[action] = ks.label
+			}
+		}
+	}
 	fmt.Print(`code-lc4ri ` + version + ` — Markdown + LC4RI runner
 
 Usage:
@@ -34,13 +42,14 @@ Run options:
 The TUI is a split screen: an always-editable Markdown editor on top and a
 live OS terminal (your shell) on the bottom.
 
-TUI shortcuts (also shown in-app with F1):
-  F2           switch focus editor ⇄ terminal
-  Ctrl-S       save the document (any time)
-  F5           run the current editor line/selection in the terminal;
+TUI shortcuts (also shown in-app with ` + keys[actHelp] + `; reassignable via
+"keybindings" in ~/.go-lc4ri/config.json):
+  ` + keys[actFocus] + `           switch focus editor ⇄ terminal
+  ` + keys[actSave] + `       save the document (any time)
+  ` + keys[actRun] + `           run the current editor line/selection in the terminal;
                output streams back into the doc as an output block
-  F6 / F7      shrink / grow the terminal pane
-  F1           help          F10   quit (or type 'exit' in the shell)
+  ` + keys[actResizeShrink] + ` / ` + keys[actResizeGrow] + `      shrink / grow the terminal pane
+  ` + keys[actHelp] + `           help          ` + keys[actQuit] + `   quit (or type 'exit' in the shell)
 `)
 }
 
