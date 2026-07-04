@@ -53,11 +53,18 @@ var DefaultDangerousPatterns = []string{
 const DefaultIndentSpaces = 2
 
 var (
-	reHorizonStar  = regexp.MustCompile(`^(?:\*\s?){3,}\s*$`)
-	reHorizonDash  = regexp.MustCompile(`^(?:-\s?){3,}\s*$`)
-	reListCommand  = regexp.MustCompile(`^(\t*)- (.*)$`)
-	reNumbered     = regexp.MustCompile(`^([1-9])\.\s+(.*)$`)
-	reBinding      = regexp.MustCompile(`\s*(?:→|->)\s*\{([A-Za-z_][A-Za-z0-9_]*)\}\s*$`)
+	reHorizonStar = regexp.MustCompile(`^(?:\*\s?){3,}\s*$`)
+	reHorizonDash = regexp.MustCompile(`^(?:-\s?){3,}\s*$`)
+	reListCommand = regexp.MustCompile(`^(\t*)- (.*)$`)
+	reNumbered    = regexp.MustCompile(`^([1-9])\.\s+(.*)$`)
+	// reBinding matches a trailing result binding such as "hostname @ {host}".
+	// "@" is the recommended operator: a single half-width character that is easy
+	// to type and — unlike >, <, |, >> — is never a shell pipeline/redirection
+	// metacharacter, so it can't clash with an ordinary command's plumbing. A
+	// whitespace is required before "@" so a literal ssh target like "user@{host}"
+	// is not mistaken for a binding. The full-width arrow "→" and the ASCII "->"
+	// remain accepted (any surrounding spacing) for backward compatibility.
+	reBinding      = regexp.MustCompile(`(?:\s*(?:→|->)|\s+@)\s*\{([A-Za-z_][A-Za-z0-9_]*)\}\s*$`)
 	reEnvDirective = regexp.MustCompile(`^#\s*env:\s*(.+)$`)
 	reInclude      = regexp.MustCompile(`(?i)^include:\s+`)
 	reOpen         = regexp.MustCompile(`(?i)^open:\s+`)
@@ -141,7 +148,9 @@ func DetectNumbered(line string) (Numbered, bool) {
 	return Numbered{Idx: m[1], Body: m[2]}, true
 }
 
-// ExtractBinding splits a trailing "→ {name}" binding off the command body.
+// ExtractBinding splits a trailing result binding ("cmd @ {name}", or the
+// legacy "→"/"->") off the command body, returning the command and the bound
+// variable name ("" when there is no binding).
 func ExtractBinding(body string) (string, string) {
 	loc := reBinding.FindStringSubmatchIndex(body)
 	if loc == nil {

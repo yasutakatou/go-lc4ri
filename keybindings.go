@@ -17,13 +17,15 @@ const (
 	actPreview      = "preview"
 	actSave         = "save"
 	actRun          = "run"
+	actRunAll       = "runAll"
+	actCancel       = "cancel"
 	actFocus        = "focus"
 	actResizeShrink = "resizeShrink"
 	actResizeGrow   = "resizeGrow"
 )
 
 // actionOrder lists the bindable actions in the order they are documented.
-var actionOrder = []string{actQuit, actHelp, actPreview, actSave, actRun, actFocus, actResizeShrink, actResizeGrow}
+var actionOrder = []string{actQuit, actHelp, actPreview, actSave, actRun, actRunAll, actCancel, actFocus, actResizeShrink, actResizeGrow}
 
 // defaultKeybindings mirrors the shortcuts this CLI shipped with before
 // keybindings became configurable.
@@ -34,6 +36,8 @@ func defaultKeybindings() map[string]string {
 		actPreview:      "F3",
 		actSave:         "Ctrl-S",
 		actRun:          "F5",
+		actRunAll:       "F9",
+		actCancel:       "F8",
 		actFocus:        "F2",
 		actResizeShrink: "F6",
 		actResizeGrow:   "F7",

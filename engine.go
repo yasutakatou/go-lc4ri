@@ -15,11 +15,12 @@ import (
 
 // ReportEntry records a single executed command for report export / timeline.
 type ReportEntry struct {
-	Command string
-	Output  string
-	Code    int
-	Ts      time.Time
-	OK      bool
+	Command  string
+	Output   string
+	Code     int
+	Ts       time.Time
+	Duration time.Duration
+	OK       bool
 }
 
 // ExecResult is the outcome of running one shell command.
@@ -313,16 +314,18 @@ func (e *Engine) runOneCommand(body string, opts RunOptions) int {
 	final := ApplyTemplate(sub, e.Cfg, opts.Profile)
 	opts.command(final)
 
+	start := time.Now()
+
 	if opts.DryRun {
 		opts.output("[dry-run] " + final + "\n")
-		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: "[dry-run]", Code: 0, Ts: time.Now(), OK: true})
+		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: "[dry-run]", Code: 0, Ts: start, Duration: time.Since(start), OK: true})
 		return 0
 	}
 
 	verdict := CheckSecurity(final, e.Cfg)
 	if !verdict.OK {
 		opts.output("[blocked] " + verdict.Reason + "\n")
-		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: "[blocked] " + verdict.Reason, Code: 1, Ts: time.Now(), OK: false})
+		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: "[blocked] " + verdict.Reason, Code: 1, Ts: start, Duration: time.Since(start), OK: false})
 		e.Vars.Status = 1
 		return 1
 	}
@@ -357,7 +360,7 @@ func (e *Engine) runOneCommand(body string, opts RunOptions) int {
 		}
 		e.Vars.Prev = r.Stdout
 		e.Vars.Status = r.Code
-		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: out, Code: r.Code, Ts: time.Now(), OK: r.Code == 0})
+		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: out, Code: r.Code, Ts: start, Duration: time.Since(start), OK: r.Code == 0})
 		return r.Code
 	}
 
@@ -372,7 +375,7 @@ func (e *Engine) runOneCommand(body string, opts RunOptions) int {
 		}
 		e.Vars.Prev = ""
 		e.Vars.Status = code
-		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: msg, Code: code, Ts: time.Now(), OK: code == 0})
+		e.Entries = append(e.Entries, ReportEntry{Command: final, Output: msg, Code: code, Ts: start, Duration: time.Since(start), OK: code == 0})
 		return code
 	}
 
@@ -383,7 +386,7 @@ func (e *Engine) runOneCommand(body string, opts RunOptions) int {
 	}
 	e.Vars.Prev = r.Stdout
 	e.Vars.Status = r.Code
-	e.Entries = append(e.Entries, ReportEntry{Command: final, Output: out, Code: r.Code, Ts: time.Now(), OK: r.Code == 0})
+	e.Entries = append(e.Entries, ReportEntry{Command: final, Output: out, Code: r.Code, Ts: start, Duration: time.Since(start), OK: r.Code == 0})
 	return r.Code
 }
 
@@ -593,9 +596,15 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			continue
 		}
 
-		// Regular command (with optional [retry: ...]).
-		cmd, rf := DetectRetryFlag(noPar)
+		// Regular command (with optional [retry: ...] and a trailing "@ {name}"
+		// result binding). The binding is a suffix and [retry:] a prefix, so peel
+		// the binding off first, then the retry flag.
+		cmdBody, bind := ExtractBinding(noPar)
+		cmd, rf := DetectRetryFlag(cmdBody)
 		code := e.runWithRetry(cmd, rf, opts)
+		if bind != "" {
+			e.Vars.Named[bind] = strings.TrimSpace(e.Vars.Prev)
+		}
 		ranAny = true
 		if code != 0 {
 			failures++

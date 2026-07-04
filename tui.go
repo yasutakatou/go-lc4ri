@@ -39,8 +39,10 @@ type tui struct {
 	// output — plus directive markers (write:, assert:, …) — is streamed back
 	// into a single ```output block placed at the boundary.
 	capMu   sync.Mutex
-	running bool        // an F5 run is in progress
+	running bool        // an F5 / Run-All run is in progress
 	sess    *runSession // the active run's output-block target
+	eng     *Engine     // the engine driving the active run (for cancel)
+	aborted bool        // set by cancelRun so finishCommand labels it "[cancelled]"
 	capIdle time.Duration
 	cwd     string // shell cwd carried across runs (seeded from the runbook dir)
 
@@ -293,6 +295,12 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 	case t.keys[actRun].matches(ev):
 		t.runFromEditor()
 		return nil
+	case t.keys[actRunAll].matches(ev):
+		t.runAll()
+		return nil
+	case t.keys[actCancel].matches(ev):
+		t.cancelRun()
+		return nil
 	case ev.Key() == tcell.KeyCtrlR:
 		// Fixed convenience alias for "run", independent of whatever key the
 		// run action itself is bound to. Consumed only while the editor is
@@ -439,6 +447,7 @@ func (t *tui) runFromEditor() {
 	t.running = true
 	t.sess = sess
 	t.capIdle = idle
+	t.aborted = false
 	t.capMu.Unlock()
 
 	// Reflect the block removal immediately and keep focus on the command line.
@@ -446,13 +455,106 @@ func (t *tui) runFromEditor() {
 	t.applyDoc(pre, nil, post, row)
 	t.refreshStatus()
 
-	go t.runEngine(lines, row, sess)
+	go t.runEngine(lines, row, sess, true)
+}
+
+// runAll executes the entire document top to bottom (like the headless runner),
+// streaming every command's output into a single ```output block appended at
+// the end. Previously-captured output blocks and executed-line markers are
+// cleared first so the run starts from a clean runbook.
+func (t *tui) runAll() {
+	t.capMu.Lock()
+	busy := t.running
+	t.capMu.Unlock()
+	if busy {
+		t.flash("[yellow]a command is still running…[-]")
+		return
+	}
+	if t.term.Kind() == "cmd" {
+		t.flash("[yellow]Run All is unavailable on cmd.exe[-]")
+		return
+	}
+
+	clean := stripRunArtifacts(strings.Split(t.editor.GetText(), "\n"))
+	// Drop trailing blank lines, then leave exactly one before the output block.
+	for len(clean) > 0 && strings.TrimSpace(clean[len(clean)-1]) == "" {
+		clean = clean[:len(clean)-1]
+	}
+	pre := append([]string{}, clean...)
+	pre = append(pre, "") // blank separator before the ```output block
+
+	sess := &runSession{pre: pre, post: nil, row: len(pre)}
+	idle := time.Duration(t.cfg.Timeout) * time.Millisecond
+	if idle <= 0 {
+		idle = 10 * time.Second
+	}
+
+	t.capMu.Lock()
+	t.running = true
+	t.sess = sess
+	t.capIdle = idle
+	t.aborted = false
+	t.capMu.Unlock()
+
+	t.app.SetFocus(t.editor)
+	t.applyDoc(pre, nil, nil, sess.row)
+	t.refreshStatus()
+
+	go t.runEngine(clean, 0, sess, false)
+}
+
+// cancelRun stops the active run: it flags the engine so the AND-chain and any
+// retries stop advancing, interrupts the command currently running in the
+// visible shell with Ctrl-C, and unblocks the capture that would otherwise wait
+// for an end marker the interrupted command will never print.
+func (t *tui) cancelRun() {
+	t.capMu.Lock()
+	if !t.running {
+		t.capMu.Unlock()
+		t.flash("[grey]nothing is running[-]")
+		return
+	}
+	eng := t.eng
+	active := t.capActive
+	begin := t.capBegin
+	t.aborted = true
+	t.capMu.Unlock()
+
+	if eng != nil {
+		eng.Cancel()
+	}
+	t.term.SendString("\x03") // Ctrl-C to the live shell
+	if active {
+		t.finishCommand(begin, true)
+	}
+	t.flash("[yellow]run cancelled[-]")
+}
+
+// stripRunArtifacts returns the document with every ```output block removed and
+// every executed-line marker cleared, i.e. the clean runbook a fresh run sees.
+func stripRunArtifacts(lines []string) []string {
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); i++ {
+		if m := reFenceOpen.FindStringSubmatch(lines[i]); m != nil {
+			info := strings.TrimSpace(lines[i][len(m[1])+len(m[2]):])
+			if fenceLang(info) == "output" {
+				if fb, ok := CollectFencedBlock(lines, i); ok {
+					i += fb.Consumed - 1
+					continue
+				}
+			}
+		}
+		out = append(out, stripDoneMarker(lines[i]))
+	}
+	return out
 }
 
 // runEngine executes the block on a background goroutine. Output and directive
 // markers are pushed into the session via the Engine's hooks; shell commands are
-// delegated to the visible terminal through execInTerminal.
-func (t *tui) runEngine(lines []string, startIdx int, sess *runSession) {
+// delegated to the visible terminal through execInTerminal. stopAtBoundary is
+// true for a run-from-cursor (F5) and false for Run-All (F9), which runs the
+// whole document top to bottom.
+func (t *tui) runEngine(lines []string, startIdx int, sess *runSession, stopAtBoundary bool) {
 	t.capMu.Lock()
 	seed := t.cwd
 	t.capMu.Unlock()
@@ -460,6 +562,9 @@ func (t *tui) runEngine(lines []string, startIdx int, sess *runSession) {
 		seed = t.dir
 	}
 	eng := NewEngine(t.cfg, seed)
+	t.capMu.Lock()
+	t.eng = eng
+	t.capMu.Unlock()
 	opts := RunOptions{
 		Profile:     t.profile,
 		ExecCommand: t.execInTerminal,
@@ -469,10 +574,11 @@ func (t *tui) runEngine(lines []string, startIdx int, sess *runSession) {
 		Prompt:      t.askPrompt,
 		ConfirmRun:  t.askConfirm,
 	}
-	eng.Run(lines, startIdx, true, opts)
+	eng.Run(lines, startIdx, stopAtBoundary, opts)
 
 	t.capMu.Lock()
 	t.running = false
+	t.eng = nil
 	t.cwd = eng.Cwd // carry the working directory into the next run
 	t.capMu.Unlock()
 	t.app.QueueUpdateDraw(func() {
@@ -616,10 +722,11 @@ func (t *tui) finishCommand(id string, timedOut bool) {
 		if out != "" {
 			t.sess.committed.WriteString("\n")
 		}
-		if timedOut {
+		if timedOut && !t.aborted {
 			t.sess.committed.WriteString("[timeout after " + fmt.Sprintf("%d", t.cfg.Timeout) + "ms]\n")
 		}
 	}
+	t.aborted = false
 	ch := t.capDone
 	t.capActive = false
 	t.capStarted = false
@@ -931,12 +1038,12 @@ func (t *tui) refreshStatus() {
 	running := t.running
 	t.capMu.Unlock()
 	if running {
-		state += " [yellow]running…[-]"
+		state += fmt.Sprintf(" [yellow]running…[-] [grey](%s:cancel)[-]", t.keyLabel(actCancel))
 	}
 	t.status.SetText(fmt.Sprintf(
-		" focus:%s%s   [grey]%s[-]:switch [grey]%s[-]:save [grey]%s/Ctrl-R[-]:run→reflect [grey]%s[-]:preview [grey]%s/%s[-]:resize [grey]%s[-]:help [grey]%s[-]:quit",
+		" focus:%s%s   [grey]%s[-]:switch [grey]%s[-]:save [grey]%s[-]:run [grey]%s[-]:run-all [grey]%s[-]:preview [grey]%s/%s[-]:resize [grey]%s[-]:help [grey]%s[-]:quit",
 		focus, state,
-		t.keyLabel(actFocus), t.keyLabel(actSave), t.keyLabel(actRun), t.keyLabel(actPreview),
+		t.keyLabel(actFocus), t.keyLabel(actSave), t.keyLabel(actRun), t.keyLabel(actRunAll), t.keyLabel(actPreview),
 		t.keyLabel(actResizeShrink), t.keyLabel(actResizeGrow), t.keyLabel(actHelp), t.keyLabel(actQuit)))
 }
 
@@ -1018,6 +1125,10 @@ func (t *tui) showHelp() {
                   if you re-run that block.
                   ([yellow]Ctrl-Enter[-] also runs, on terminals that
                   report the modifier — iTerm2 / kitty / …)
+    [yellow]%RUNALL%[-]           run the whole document top to bottom, output
+                  appended as one ` + "```output" + ` block at the end
+    [yellow]%CANCEL%[-]           cancel the running block (stops the chain /
+                  retries and interrupts the current command)
     (Tab inserts a tab / triggers indentation as usual)
     [yellow]%PREVIEW%[-]           preview the document as rendered Markdown,
                   full-screen and read-only (headings, bold/italic,
@@ -1042,12 +1153,14 @@ func (t *tui) showHelp() {
 		"%GROW%", t.keyLabel(actResizeGrow),
 		"%SAVE%", t.keyLabel(actSave),
 		"%RUN%", t.keyLabel(actRun),
+		"%RUNALL%", t.keyLabel(actRunAll),
+		"%CANCEL%", t.keyLabel(actCancel),
 		"%PREVIEW%", t.keyLabel(actPreview),
 		"%HELP%", t.keyLabel(actHelp),
 		"%QUIT%", t.keyLabel(actQuit),
 	)
 	help.SetText(replacer.Replace(tmpl))
 	t.overlay = "help"
-	t.pages.AddPage("help", t.modalWrap(help, 64, 26), true, true)
+	t.pages.AddPage("help", t.modalWrap(help, 64, 30), true, true)
 	t.app.SetFocus(help)
 }

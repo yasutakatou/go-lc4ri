@@ -24,7 +24,7 @@ document behaves identically in the editor and in the terminal.
 │ NAME       STATUS   ROLES    AGE        ← a real OS shell  │
 │ node-1     Ready    <none>   12d          (live)           │
 ├───────────────────────────────────────────────────────────┤
-│ focus:editor  F2:switch Ctrl-S:save F5/Ctrl-R:run→reflect… │
+│ F5:run F9:run-all F8:cancel Ctrl-S:save F1:help F10:quit   │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -37,18 +37,20 @@ document behaves identically in the editor and in the terminal.
   cursor to the next boundary through the **full LC4RI engine** (AND-chain, variables,
   assertions, parallel, retry, `write:`, `include:`, …); commands run in the
   visible shell and their output streams **back into the document** as an
-  editable ` ```output ` block; `Ctrl-S` saves.
+  editable ` ```output ` block; `Ctrl-S` saves. `F9` runs the **whole document**
+  top to bottom; `F8` **cancels** a run in progress.
 - **Text selection** — hold `Shift` while moving the cursor (or `Shift`+click)
   in the editor to select a range of text, then cut / copy / paste it.
 - **Markdown preview** — `F3` renders the document full-screen as styled,
   read-only Markdown (headings, bold/italic, lists, quotes, code fences,
   tables); `Esc` / `F3` returns to the editor.
 - **Headless runner** — `code-lc4ri run` for CI / scripting, sharing the exact
-  same engine, with a non-zero exit code on any failure and optional HTML /
-  Markdown report export.
+  same engine, with a non-zero exit code on any failure and optional report
+  export as **HTML**, **Markdown**, **JUnit XML** (`.xml`) or **JSON** (`.json`) —
+  each carrying per-command exit codes, durations and a pass/fail summary.
 - **AND-chain execution** — indentation expresses dependencies; a step only runs
   if its parent succeeded.
-- **Variables** — numbered (`{1}`–`{9}`), named (`→ {name}`), built-ins
+- **Variables** — numbered (`{1}`–`{9}`), named (`@ {name}`), built-ins
   (`{$PREV}`, `{$STATUS}`, `{$CWD}`, …), `.env` loading and interactive `prompt:`.
 - **Control flow** — `[parallel]` groups, `[retry: N, interval]`, `assert:`,
   horizon / blank-line section boundaries.
@@ -99,16 +101,20 @@ make install                  # installs to $GOBIN
 |---|---|
 | `--dry-run` | Show the resolved commands without executing them |
 | `--profile NAME` | Wrap every command with the named profile from config |
-| `--report FILE` | Write an execution report (`.html` or `.md`) |
+| `--report FILE` | Write an execution report; format is chosen by extension: `.html`, `.md`, `.xml` (JUnit) or `.json` |
 
 ```bash
 code-lc4ri run runbook.md
 code-lc4ri run runbook.md --dry-run
 code-lc4ri run runbook.md --profile prod-ssh --report report.html
+code-lc4ri run runbook.md --report results.xml    # JUnit XML for CI test reporting
+code-lc4ri run runbook.md --report results.json   # machine-readable JSON
 ```
 
 The exit code is non-zero if any command failed or any `assert:` failed, so it
-slots into CI directly.
+slots into CI directly. A `.xml` report is standard **JUnit** — GitHub Actions,
+GitLab and Jenkins render each command as a test case with its duration and, on
+failure, its captured output.
 
 ---
 
@@ -160,7 +166,7 @@ far down the document you've executed (every line beginning with two spaces is
 highlighted):
 
 ````markdown
-  1. hostname → {host}          ← two leading spaces, drawn green = already run
+  1. hostname @ {host}          ← two leading spaces, drawn green = already run
 - echo deploying to {host}
 - kubectl get nodes
 
@@ -194,6 +200,23 @@ output). Headless `run` never touches the source file.
 > `[parallel]` groups run sequentially in the TUI (a single visible shell can't
 > interleave captures); headless `run` runs them concurrently.
 
+### Running the whole document with F9
+
+Press **`F9`** to run the **entire document** top to bottom — the same as headless
+`run`, but in the live shell. Existing ` ```output ` blocks and executed-line
+markers are cleared first, then every command's output streams into a single
+` ```output ` block appended at the end of the document. (Unavailable on
+`cmd.exe`, which can't be captured.)
+
+### Cancelling a run with F8
+
+Press **`F8`** while a block (or a full-document `F9` run) is executing to cancel
+it: the AND-chain and any `[retry:]` loop stop advancing, the command currently
+running in the shell is interrupted (a `Ctrl-C` is sent), and the captured output
+so far is kept and marked `[cancelled]`. `F8` works from either pane, so a long
+`[retry: 20, 5s]` wait or a hung command can always be stopped without switching
+focus.
+
 ### Markdown preview with F3
 
 Press **`F3`** to render the current buffer as styled Markdown, full-screen and
@@ -220,6 +243,8 @@ always reflect whatever is actually configured, not these defaults.
 | `Ctrl-S` | Save the document to disk (any time) | `save` |
 | `F5` / `Ctrl-R` | Run the block from the cursor to the next boundary; stream output back into the doc and flag the block's first line with two leading spaces (drawn green) as executed. `Ctrl-R` is consumed only while the editor is focused, so the shell keeps `Ctrl-R` for reverse history search | `run` (`Ctrl-R` is a fixed alias, always active regardless of how `run` is bound) |
 | `Ctrl-Enter` | Also runs the block, on terminals that report the modifier (iTerm2 / kitty / …); a plain `Enter` still inserts a newline | — (fixed alias for `run`, not bindable) |
+| `F9` | Run the whole document top to bottom; output appended as one ` ```output ` block at the end | `runAll` |
+| `F8` | Cancel the running block / document run (stops the AND-chain and retries, interrupts the current command) | `cancel` |
 | `F3` | Toggle the read-only Markdown preview (dismiss with `Esc` or `F3`) | `preview` |
 | `F6` / `F7` | Shrink / grow the terminal pane (widen / narrow the editor) | `resizeShrink` / `resizeGrow` |
 | mouse click | Focus a pane | — (not bindable) |
@@ -264,10 +289,16 @@ one command has run:
 ### Numbered variables & bindings
 
 ```markdown
-1. hostname → {host}      ← stores stdout in {1} and {host}
+1. hostname @ {host}      ← stores stdout in {1} and {host}
 - echo working on {host}
-- ls → {files}            ← bind a list command's output to {files}
+- ls @ {files}            ← bind a list command's output to {files}
 ```
+
+The binding operator is **`@`** — a single half-width character that is easy to
+type and, unlike `>` / `<` / `|`, never collides with a command's own pipeline
+or redirection. It must be preceded by a space, so an `ssh user@{host}` target is
+left untouched. The full-width arrow `→` and the ASCII `->` are still accepted for
+backward compatibility.
 
 Variables (`1`–`9` and `{name}`) and built-ins are expanded in any command:
 
@@ -373,6 +404,8 @@ to edit. All keys are optional.
     "preview": "F3",
     "save": "Ctrl-S",
     "run": "F5",
+    "runAll": "F9",
+    "cancel": "F8",
     "focus": "F2",
     "resizeShrink": "F6",
     "resizeGrow": "F7"
@@ -398,6 +431,8 @@ the resolved bindings, not the hardcoded defaults.
 | `preview` | `F3` | Toggle the read-only Markdown preview |
 | `save` | `Ctrl-S` | Save the document to disk |
 | `run` | `F5` | Run the block from the cursor to the next boundary |
+| `runAll` | `F9` | Run the whole document top to bottom |
+| `cancel` | `F8` | Cancel the running block / document run |
 | `focus` | `F2` | Switch focus between the editor and the terminal |
 | `resizeShrink` | `F6` | Shrink the terminal pane |
 | `resizeGrow` | `F7` | Grow the terminal pane |

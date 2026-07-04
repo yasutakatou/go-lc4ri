@@ -37,7 +37,8 @@ Usage:
 Run options:
   --dry-run            Show resolved commands without executing them
   --profile NAME       Wrap commands with the named profile from config.json
-  --report FILE        Write an execution report (.html or .md)
+  --report FILE        Write an execution report; format by extension:
+                       .html, .md, .xml (JUnit) or .json
 
 The TUI is a split screen: an always-editable Markdown editor on top and a
 live OS terminal (your shell) on the bottom.
@@ -46,8 +47,10 @@ TUI shortcuts (also shown in-app with ` + keys[actHelp] + `; reassignable via
 "keybindings" in ~/.go-lc4ri/config.json):
   ` + keys[actFocus] + `           switch focus editor ⇄ terminal
   ` + keys[actSave] + `       save the document (any time)
-  ` + keys[actRun] + `           run the current editor line/selection in the terminal;
+  ` + keys[actRun] + `           run the block from the cursor to the next boundary;
                output streams back into the doc as an output block
+  ` + keys[actRunAll] + `           run the whole document top to bottom
+  ` + keys[actCancel] + `           cancel a run in progress
   ` + keys[actResizeShrink] + ` / ` + keys[actResizeGrow] + `      shrink / grow the terminal pane
   ` + keys[actHelp] + `           help          ` + keys[actQuit] + `   quit (or type 'exit' in the shell)
 `)
