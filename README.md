@@ -67,22 +67,12 @@ document behaves identically in the editor and in the terminal.
 ### Build from source
 
 ```bash
-git clone https://github.com/yasutakatou/code-lc4ri-cli
-cd code-lc4ri-cli
-go build -o code-lc4ri .      # produces ./code-lc4ri
-# or
-make build
+git clone https://github.com/yasutakatou/go-lc4ri
+cd go-lc4ri 
+go build -o go-lc4ri .
 ```
 
-Requires **Go 1.24+**. Dependencies (`tview` / `tcell`) are fetched automatically.
-
-### go install
-
-```bash
-go install github.com/yasutakatou/code-lc4ri/cli@latest
-# or, from a clone:
-make install                  # installs to $GOBIN
-```
+or download binary from [release page](https://github.com/yasutakatou/go-lc4ri/releases). save binary file, copy to entryed execute path directory.
 
 ---
 
