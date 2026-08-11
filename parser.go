@@ -79,11 +79,6 @@ var (
 	reExportCmd    = regexp.MustCompile(`^export\s+([A-Za-z_][A-Za-z0-9_]*)=(.*)$`)
 )
 
-// RegTab returns the regexp that matches a list command at AND-chain depth cnt.
-func RegTab(cnt int) *regexp.Regexp {
-	return regexp.MustCompile("^" + strings.Repeat("\t", cnt) + "- ")
-}
-
 // NormalizeIndent converts a line's leading whitespace into tab-based depth so
 // that 2-space Markdown indentation maps onto AND-chain levels.
 func NormalizeIndent(line string, tabWidth int) string {

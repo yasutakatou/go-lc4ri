@@ -408,15 +408,46 @@ func (e *Engine) runWithRetry(body string, rf RetryFlag, opts RunOptions) int {
 // boundary classifies a line as a chain-stopping separator for run-from-cursor.
 func isBlank(line string) bool { return strings.TrimSpace(line) == "" }
 
+// chainFrame records the outcome of one AND-chain step at a given tab-depth,
+// so a later line can find its nearest enclosing ancestor's result.
+type chainFrame struct {
+	depth int
+	ok    bool
+}
+
 // Run executes the runbook lines starting at startIdx. When stopAtBoundary is
 // true (interactive run-from-cursor) execution halts at the first horizon,
 // blank line or output fence once at least one command has run. It returns the
 // number of failed commands/assertions.
+//
+// AND-chain state is tracked as a stack of per-depth outcomes rather than a
+// single running counter: a line's indentation depth is looked up against the
+// nearest enclosing ancestor (the last frame with a strictly smaller depth),
+// not against how many sibling steps happened to run before it. That makes
+// multiple children under one parent (siblings at the same depth) and
+// documents that indent by more than one tab-width per level behave the same
+// as a single-child chain — both only require their real parent to have
+// succeeded, instead of an exact-depth match against a flat run count.
 func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts RunOptions) int {
 	e.ResetCancel()
 	failures := 0
-	execCount := 0
 	ranAny := false
+	// chain[0] is a virtual root (depth -1, always ok) so top-level (depth 0)
+	// lines always run regardless of any earlier failure.
+	chain := []chainFrame{{depth: -1, ok: true}}
+
+	// chainAllows pops frames at or deeper than depth — stale siblings and
+	// descendants that are no longer relevant — then reports whether the
+	// nearest remaining (shallower) ancestor succeeded.
+	chainAllows := func(depth int) bool {
+		for len(chain) > 0 && chain[len(chain)-1].depth >= depth {
+			chain = chain[:len(chain)-1]
+		}
+		return chain[len(chain)-1].ok
+	}
+	chainRecord := func(depth int, ok bool) {
+		chain = append(chain, chainFrame{depth: depth, ok: ok})
+	}
 
 	for i := startIdx; i < len(lines); i++ {
 		if e.isCancelled() {
@@ -430,7 +461,7 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			if ranAny && stopAtBoundary {
 				break
 			}
-			execCount = 0
+			chain = chain[:1]
 			continue
 		}
 		// Blank line boundary (v1.5.3).
@@ -495,51 +526,71 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 
 		// AND-chain list-command handling (normalise spaces → tabs first).
 		norm := NormalizeIndent(raw, e.TabWidth)
-		if !RegTab(execCount).MatchString(norm) {
-			execCount = 0
+		lc, isList := DetectListCommand(norm)
+		if !isList {
+			continue
 		}
-		depthRe := RegTab(execCount)
-		if !depthRe.MatchString(norm) {
+		depth := lc.Depth
+		if !chainAllows(depth) {
 			continue
 		}
 
 		// write: directive (consumes the following fenced block).
-		if wd, ok := ParseWriteDirective(norm); ok && wd.Depth == execCount {
+		if wd, ok := ParseWriteDirective(norm); ok {
 			consumed := e.handleWrite(wd, lines, i, opts)
 			ranAny = true
-			execCount++
+			chainRecord(depth, true)
 			i += consumed
 			continue
 		}
 
 		// prompt: directive.
-		if pd, ok := ParsePromptDirective(norm); ok && pd.Depth == execCount {
+		if pd, ok := ParsePromptDirective(norm); ok {
 			ok2 := e.handlePrompt(pd, opts)
 			ranAny = true
-			if ok2 {
-				execCount++
-			} else {
-				execCount = 0
+			if !ok2 {
 				failures++
 			}
+			chainRecord(depth, ok2)
 			continue
 		}
 
-		body := depthRe.ReplaceAllString(norm, "")
+		body := lc.Body
+		// Join shell-style "\" line continuations so a multi-line command (e.g.
+		// a long `docker run \` invocation split across several list lines)
+		// resolves to one command instead of running only its first line.
+		consumedCont := 0
+		for strings.HasSuffix(strings.TrimRight(body, " \t"), "\\") && i+1+consumedCont < len(lines) {
+			next := lines[i+1+consumedCont]
+			if isBlank(next) || HorizonCheck(next) || reFenceOpen.MatchString(next) {
+				break
+			}
+			if _, ok := DetectListCommand(NormalizeIndent(next, e.TabWidth)); ok {
+				break
+			}
+			if _, ok := DetectNumbered(next); ok {
+				break
+			}
+			body = strings.TrimSuffix(strings.TrimRight(body, " \t"), "\\") + " " + strings.TrimSpace(next)
+			consumedCont++
+		}
+		i += consumedCont
+
 		noPar, parallel := DetectParallelFlag(body)
 
 		// include: another runbook.
 		if reInclude.MatchString(noPar) {
 			inc := strings.TrimSpace(reInclude.ReplaceAllString(noPar, ""))
-			failures += e.handleInclude(inc, opts)
+			fcount := e.handleInclude(inc, opts)
+			failures += fcount
 			ranAny = true
-			execCount++
+			chainRecord(depth, fcount == 0)
 			continue
 		}
 		// open: VS Code only — informational in the CLI.
 		if reOpen.MatchString(noPar) {
 			opts.info("[open: " + strings.TrimSpace(reOpen.ReplaceAllString(noPar, "")) + " — skipped in CLI]")
-			execCount++
+			chainRecord(depth, true)
 			continue
 		}
 		// terminal passthrough: - ! command
@@ -550,7 +601,7 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			if code != 0 {
 				failures++
 			}
-			execCount = okStep(execCount, code)
+			chainRecord(depth, code == 0)
 			continue
 		}
 		// assert: directive.
@@ -561,9 +612,9 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			} else {
 				opts.info("✗ ASSERT FAILED: " + noPar)
 				failures++
-				execCount = 0
 			}
 			ranAny = true
+			chainRecord(depth, pass)
 			continue
 		}
 
@@ -573,11 +624,11 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			j := i + 1
 			for j < len(lines) {
 				njorm := NormalizeIndent(lines[j], e.TabWidth)
-				if !depthRe.MatchString(njorm) {
+				njlc, njok := DetectListCommand(njorm)
+				if !njok || njlc.Depth != depth {
 					break
 				}
-				nbody := depthRe.ReplaceAllString(njorm, "")
-				nb, np := DetectParallelFlag(nbody)
+				nb, np := DetectParallelFlag(njlc.Body)
 				if !np {
 					break
 				}
@@ -589,10 +640,8 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			ranAny = true
 			if !allOK {
 				failures++
-				execCount = 0
-			} else {
-				execCount++
 			}
+			chainRecord(depth, allOK)
 			continue
 		}
 
@@ -609,7 +658,7 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 		if code != 0 {
 			failures++
 		}
-		execCount = okStep(execCount, code)
+		chainRecord(depth, code == 0)
 	}
 	return failures
 }
@@ -679,13 +728,6 @@ func FindBlockBoundary(lines []string, startIdx, tabWidth int) int {
 		// Prose / other text: not a boundary — keep scanning.
 	}
 	return len(lines)
-}
-
-func okStep(execCount, code int) int {
-	if code == 0 {
-		return execCount + 1
-	}
-	return 0
 }
 
 func (e *Engine) runParallel(items []string, opts RunOptions) bool {
