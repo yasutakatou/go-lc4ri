@@ -29,7 +29,7 @@ type ExecResult struct {
 	Stderr   string
 	Code     int
 	TimedOut bool
-	Cwd      string // shell's working directory after the command (live-terminal mode)
+	Cwd      string // shell's working directory after the command (live-terminal mode, or private-subprocess POSIX capture)
 }
 
 // RunOptions carries per-run callbacks and flags. The TUI and the headless
@@ -159,6 +159,19 @@ func (e *Engine) shellInvocation(cmd string) (string, []string) {
 	}
 }
 
+// posixPwdFD is the file descriptor (3, the first slot after stdin/stdout/
+// stderr) a POSIX script's trailing `pwd` capture writes to. Kept off stdout/
+// stderr entirely so the captured command output is never polluted by it.
+const posixPwdFD = 3
+
+// wrapPosixPwdCapture appends a trailer that prints the script's final $PWD to
+// fd 3 after it finishes, preserving its real exit code (available scripts may
+// end in a backgrounded `&` job or their own `exit`, so the trailer re-derives
+// and re-raises $? rather than assuming the script's last statement is it).
+func wrapPosixPwdCapture(script string) string {
+	return script + "\n__lc4ri_ec=$?; pwd >&" + fmt.Sprint(posixPwdFD) + " 2>/dev/null; exit \"$__lc4ri_ec\""
+}
+
 // execShell runs a single command, streaming output and honouring the
 // inactivity timeout and cancellation.
 func (e *Engine) execShell(cmd string, opts RunOptions) ExecResult {
@@ -168,6 +181,18 @@ func (e *Engine) execShell(cmd string, opts RunOptions) ExecResult {
 		return opts.ExecCommand(cmd)
 	}
 	name, args := e.shellInvocation(cmd)
+
+	// POSIX shells (bash/sh — the default outside Windows, and covers `cd`
+	// done anywhere in the command: a compound `cd x && …`, a multi-line
+	// ```bash block, etc.) get their final working directory captured on a
+	// side channel so write:/{$CWD}/subsequent commands honour it, matching
+	// what the live-terminal (TUI) path already does via the shell's real
+	// $PWD. cmd.exe/PowerShell are left as before.
+	capturePwd := runtime.GOOS != "windows" && (name == "/bin/bash" || name == "/bin/sh")
+	if capturePwd {
+		name, args = e.shellInvocation(wrapPosixPwdCapture(cmd))
+	}
+
 	c := exec.Command(name, args...)
 	c.Dir = e.Cwd
 	c.Env = e.envSlice()
@@ -176,17 +201,34 @@ func (e *Engine) execShell(cmd string, opts RunOptions) ExecResult {
 	stdout, _ := c.StdoutPipe()
 	stderr, _ := c.StderrPipe()
 
+	var pwdR *os.File
+	if capturePwd {
+		pr, pw, err := os.Pipe()
+		if err == nil {
+			c.ExtraFiles = []*os.File{pw}
+			pwdR = pr
+		}
+	}
+
 	if err := c.Start(); err != nil {
+		if pwdR != nil {
+			pwdR.Close()
+		}
 		out := fmt.Sprintf("[error] %v", err)
 		opts.output(out + "\n")
 		return ExecResult{Stderr: out, Code: -1}
+	}
+	if capturePwd && len(c.ExtraFiles) > 0 {
+		// Close the parent's copy of the write end: the read end only sees EOF
+		// once every write-end fd (including this one) is closed.
+		c.ExtraFiles[0].Close()
 	}
 
 	e.mu.Lock()
 	e.current = c
 	e.mu.Unlock()
 
-	var outBuf, errBuf strings.Builder
+	var outBuf, errBuf, pwdBuf strings.Builder
 	var wg sync.WaitGroup
 	timedOut := false
 
@@ -225,11 +267,31 @@ func (e *Engine) execShell(cmd string, opts RunOptions) ExecResult {
 	wg.Add(2)
 	go pump(stdout, &outBuf)
 	go pump(stderr, &errBuf)
-	wg.Wait()
+	if pwdR != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b, _ := io.ReadAll(pwdR)
+			pwdBuf.Write(b)
+		}()
+	}
+
+	// Wait for the tracked process itself first, not the pipes: a runbook step
+	// that backgrounds a long-lived process (e.g. a trailing `server &`) leaves
+	// a grandchild holding its own inherited copy of stdout/stderr/the pwd fd
+	// open long after this command's own script has exited, which would
+	// otherwise block the pumps' Read() forever and hang the whole run.
+	// Cmd.Wait() closes the stdout/stderr pipes it owns as part of its own
+	// cleanup regardless of pending reads, unblocking those two pumps; the pwd
+	// side channel isn't Cmd-managed, so it's closed explicitly right after.
 	err := c.Wait()
 	if timer != nil {
 		timer.Stop()
 	}
+	if pwdR != nil {
+		pwdR.Close()
+	}
+	wg.Wait()
 
 	e.mu.Lock()
 	e.current = nil
@@ -246,7 +308,7 @@ func (e *Engine) execShell(cmd string, opts RunOptions) ExecResult {
 	if timedOut {
 		opts.output(fmt.Sprintf("\n[timeout after %dms]\n", e.Cfg.Timeout))
 	}
-	return ExecResult{Stdout: outBuf.String(), Stderr: errBuf.String(), Code: code, TimedOut: timedOut}
+	return ExecResult{Stdout: outBuf.String(), Stderr: errBuf.String(), Code: code, TimedOut: timedOut, Cwd: strings.TrimSpace(pwdBuf.String())}
 }
 
 // resolvePath resolves p relative to the engine's tracked working directory.
@@ -380,6 +442,14 @@ func (e *Engine) runOneCommand(body string, opts RunOptions) int {
 	}
 
 	r := e.execShell(final, opts)
+	// Sync the tracked cwd from the script's own $PWD (POSIX capture in
+	// execShell), so a `cd` done inside a compound command or a multi-line
+	// ```bash block is honoured by subsequent write:/{$CWD}/commands, the same
+	// as the live-terminal path above already does.
+	if r.Cwd != "" {
+		e.Cwd = r.Cwd
+		e.Vars.Cwd = r.Cwd
+	}
 	out := r.Stdout
 	if r.Stderr != "" {
 		out += "\n[stderr]\n" + r.Stderr

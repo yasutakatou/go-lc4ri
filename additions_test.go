@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +72,95 @@ func TestReportFormats(t *testing.T) {
 		if !strings.Contains(js, want) {
 			t.Errorf("JSON report missing %q\n%s", want, js)
 		}
+	}
+}
+
+// TestHeadlessWriteFollowsCdInFencedBash checks that a `cd` done inside a
+// multi-line ```bash block is tracked by the headless engine (a private
+// subprocess, not the TUI's live shell), so a later write: directive resolves
+// against the directory the script cd'd into rather than the runbook's
+// original working directory.
+func TestHeadlessWriteFollowsCdInFencedBash(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix-shell capture test")
+	}
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "subdir")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig()
+	eng := NewEngine(cfg, dir)
+	var out strings.Builder
+	opts := RunOptions{OnOutput: func(s string) { out.WriteString(s) }, OnInfo: func(s string) { out.WriteString(s) }}
+
+	lines := []string{
+		"```bash",
+		"mkdir -p subdir",
+		"cd subdir",
+		"```",
+		"- write: out.txt",
+		"  ```",
+		"  hello_cd_555",
+		"  ```",
+	}
+	eng.Run(lines, 0, false, opts)
+
+	target := filepath.Join(sub, "out.txt")
+	wrong := filepath.Join(dir, "out.txt")
+	b, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("write: did not follow cd into %s: %v\noutput:\n%s", sub, err, out.String())
+	}
+	if !strings.Contains(string(b), "hello_cd_555") {
+		t.Errorf("wrote %q, want it to contain %q", string(b), "hello_cd_555")
+	}
+	if fileExists(wrong) {
+		t.Errorf("file also written to runbook dir %s", wrong)
+	}
+	// Compare resolved paths: the shell's $PWD reports the physical path,
+	// which on macOS differs from t.TempDir()'s /var symlink alias.
+	wantCwd, _ := filepath.EvalSymlinks(sub)
+	gotCwd, _ := filepath.EvalSymlinks(eng.Cwd)
+	if gotCwd != wantCwd {
+		t.Errorf("engine.Cwd = %q, want %q", eng.Cwd, sub)
+	}
+}
+
+// TestHeadlessSurvivesBackgroundedProcess checks that a step which backgrounds
+// a long-lived process (e.g. a runbook doing `server & \n curl …`, as with
+// `kubectl port-forward … &`) doesn't hang the headless engine forever: the
+// backgrounded grandchild inherits (and keeps open) its own copy of the
+// command's stdout/stderr/pwd-capture pipes, which must not block completion
+// once the tracked script itself has exited.
+func TestHeadlessSurvivesBackgroundedProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("posix-shell capture test")
+	}
+	cfg := DefaultConfig()
+	eng := NewEngine(cfg, ".")
+	var out strings.Builder
+	opts := RunOptions{OnOutput: func(s string) { out.WriteString(s) }}
+
+	lines := []string{
+		"```bash",
+		"sleep 20 &",
+		"echo done_after_bg",
+		"```",
+	}
+	done := make(chan struct{})
+	go func() {
+		eng.Run(lines, 0, false, opts)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run hung: a backgrounded child process blocked completion")
+	}
+	if !strings.Contains(out.String(), "done_after_bg") {
+		t.Errorf("output = %q, want it to contain %q", out.String(), "done_after_bg")
 	}
 }
 
