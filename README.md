@@ -12,21 +12,51 @@ ships as a single static binary. It implements the same runbook grammar as the
 document behaves identically in the editor and in the terminal.
 
 ```
-┌─ runbook.md — Markdown (Ctrl-S save) ─────────────────────┐
-│   # Deploy                                                 │
-│ ▸ - kubectl get nodes          ← cursor; press F5 to run   │
-│   ```output                       output streamed back in  │
-│   NAME     STATUS  ROLES  AGE     as an editable block     │
-│   node-1   Ready   <none> 12d                              │
-│   ```                                                      │
-├─ terminal — zsh ──────────────────────────────────────────┤
-│ $ kubectl get nodes                                        │
-│ NAME       STATUS   ROLES    AGE        ← a real OS shell  │
-│ node-1     Ready    <none>   12d          (live)           │
-├───────────────────────────────────────────────────────────┤
-│ F5:run F9:run-all F8:cancel Ctrl-S:save F1:help F10:quit   │
-└───────────────────────────────────────────────────────────┘
+┌─ ① Runbook — runbook.md · F5: run the block at the cursor · Ctrl-S: save ─┐
+│   # Deploy                                                                 │
+│ ▸ - kubectl get nodes          ← cursor; press F5 to run                   │
+│   ```output                       ③ output streamed back in                │
+│   NAME     STATUS  ROLES  AGE        as an editable block                  │
+│   node-1   Ready   <none> 12d                                              │
+│   ```                                                                      │
+├─ ② Terminal — zsh · commands run here (F2: focus) ────────────────────────┤
+│ $ kubectl get nodes                                                        │
+│ NAME       STATUS   ROLES    AGE        ← a real OS shell                  │
+│ node-1     Ready    <none>   12d          (live)                           │
+├───────────────────────────────────────────────────────────────────────────┤
+│ ▶ F5 runs: kubectl get nodes → output to the ```output block               │
+│ F1:help F5:run Ctrl-N/Ctrl-P:step Ctrl-S:save F2:switch F9:run-all …       │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
+
+## How it works — 30 seconds
+
+Three things happen, always in this order:
+
+| | | |
+|---|---|---|
+| **①** | **Runbook** (top pane) | Put the cursor on a step and press **`F5`**. `Ctrl-N` / `Ctrl-P` jump to the next / previous step, so you never scroll looking for one. |
+| **②** | **Terminal** (bottom pane) | The step runs there, in a real shell you can also type into yourself. |
+| **③** | ` ```output ` **block** | Its output is written **back into the runbook**, right under the step. Then the cursor moves on to the next step by itself. |
+
+A **step** is one of exactly three things — everything else in the document is
+documentation that is never executed:
+
+| Runnable | Not runnable |
+|---|---|
+| `- kubectl get nodes` (list item) | ` ```shell ` / ` ```console ` / a plain ` ``` ` block |
+| `1. hostname @ {host}` (numbered, binds `{1}`) | Indented code blocks, prose, headings, tables |
+| ` ```bash ` … ` ``` ` (fenced script; ` ```yaml `, `json`, … are written to disk) | Text inside an ` ```output ` block |
+
+If you press `F5` where there is nothing runnable, the status bar says so and
+the document is left untouched — no empty ` ```output ` block, no green
+"executed" marker. Press `Ctrl-N` to jump to the nearest real step.
+
+> **Note on code blocks.** The examples in this README are wrapped in
+> ` ```markdown ` fences *for display only* — copy what is **inside** them.
+> A command written inside an ordinary ` ``` ` code block is documentation, not
+> a step; use a `- ` list item, or tag the fence ` ```bash ` to execute the
+> whole block as a script.
 
 ---
 
@@ -39,6 +69,12 @@ document behaves identically in the editor and in the terminal.
   visible shell and their output streams **back into the document** as an
   editable ` ```output ` block; `Ctrl-S` saves. `F9` runs the **whole document**
   top to bottom; `F8` **cancels** a run in progress.
+- **Step-by-step navigation** — `Ctrl-N` / `Ctrl-P` jump straight to the next /
+  previous runnable step, and finishing a run parks the cursor on the step that
+  comes after it: a whole runbook can be worked through with `F5` alone, without
+  scrolling. The status bar always names the command `F5` would run from where
+  the cursor is — and tells you when there is none, instead of running nothing
+  silently.
 - **Text selection** — hold `Shift` while moving the cursor (or `Shift`+click)
   in the editor to select a range of text, then cut / copy / paste it.
 - **Markdown preview** — `F3` renders the document full-screen as styled,
@@ -110,21 +146,47 @@ failure, its captured output.
 
 ## The interactive TUI
 
-The TUI is a split screen with two panes plus a status bar:
+The TUI is a split screen with two panes plus a two-row status bar. Each pane's
+border states its role, so the screen explains itself:
 
-- **Top pane — Markdown editor.** A normal, always-editable text editor holding
-  your `.md` document. Type and edit Markdown freely; `Ctrl-S` saves to disk.
-  Hold `Shift` while moving the cursor (arrows, Home/End, word-jumps) or
-  `Shift`+click to select a range of text — `Ctrl-Q` copies it, `Ctrl-X` cuts
-  it, `Ctrl-V` replaces it (or inserts at the cursor if nothing is selected).
-- **Bottom pane — live OS shell.** A real terminal attached to your shell
-  (zsh / bash / PowerShell …). When focused it behaves like any terminal —
-  keystrokes (incl. `Ctrl-C`) go straight to the shell.
-- **Status bar** — current focus, an unsaved/running indicator and a one-line
-  shortcut reminder.
+- **① Runbook (top pane) — Markdown editor.** A normal, always-editable text
+  editor holding your `.md` document. Type and edit Markdown freely; `Ctrl-S`
+  saves to disk. Hold `Shift` while moving the cursor (arrows, Home/End,
+  word-jumps) or `Shift`+click to select a range of text — `Ctrl-Q` copies it,
+  `Ctrl-X` cuts it, `Ctrl-V` replaces it (or inserts at the cursor if nothing is
+  selected).
+- **② Terminal (bottom pane) — live OS shell.** A real terminal attached to your
+  shell (zsh / bash / PowerShell …) and **where every step actually runs**. When
+  focused it behaves like any terminal — keystrokes (incl. `Ctrl-C`) go straight
+  to the shell.
+- **Status bar** — two rows. The first says what `F5` would do *right now*:
+  the command under the cursor (`▶ F5 runs: kubectl get nodes …`), a `running…`
+  indicator during a run, a note that the shell has focus, or a warning that
+  there is nothing runnable at the cursor. The second is the shortcut reminder,
+  ordered so the keys that matter most survive on a narrow terminal, preceded by
+  the `*unsaved` flag.
 
 `F2` (or a mouse click) moves focus between the two panes. `Tab` is left for the
 focused pane — shell completion in the terminal, indentation in the editor.
+
+### Moving between steps
+
+Reaching the next command never requires scrolling through the documentation
+around it:
+
+- **`Ctrl-N` / `Ctrl-P`** jump the cursor to the next / previous runnable step
+  (a `- command`, a `1. command` or a ` ```bash ` / ` ```yaml ` fence). Text
+  inside ` ```output ` blocks is skipped, so captured output that happens to
+  look like a list item is never mistaken for a step. Both keys are consumed
+  **only while the editor is focused** — the shell keeps `Ctrl-N` / `Ctrl-P`
+  for its own history navigation.
+- **After a run finishes the cursor advances by itself** to the first step past
+  the ` ```output ` block that was just written. Working through a runbook is
+  therefore `F5`, `F5`, `F5` — with `Ctrl-N` available whenever you want to skip
+  a step rather than run it.
+
+If there is no step in the requested direction the cursor stays where it is and
+the status bar says so.
 
 ### Running a block with F5 / Ctrl-R
 
@@ -134,6 +196,18 @@ line, `***` / `---` horizon, or an output fence) as one batch, driving the
 **same LC4RI engine** as headless `run`: the AND-chain, numbered/named variables,
 `assert:`, `[parallel]`, `[retry:]`, `prompt:`, `write:`, `include:`, `# env:`
 and fenced ` ```bash ` / ` ```yaml ` blocks all apply.
+
+If the region from the cursor to that boundary contains **no runnable step**,
+`F5` does nothing at all and says so in the status bar:
+
+````
+nothing to run here — a step is - command, 1. command or a ```bash block
+````
+
+The document is left byte-for-byte unchanged — no ` ```output ` block appears
+and no line is flagged as executed. (The two situations that used to produce a
+silent, empty output block: the cursor sitting in prose, and the cursor sitting
+*inside* a fenced block instead of on its opening ` ```bash ` line.)
 
 Shell commands run in the visible bottom terminal (a leading `- ` / `1. ` prefix
 is stripped), and their output — together with per-command headers, `---`
@@ -173,9 +247,13 @@ node-1     Ready    <none>   12d
 ```
 ````
 
+When the run finishes, the cursor moves down to the **first step after the
+output block** so the next `F5` continues where this one left off; if the block
+that just ran was the last one in the document, the cursor stays put.
+
 Re-running the same block replaces its previous ` ```output ` block in place and
 clears the two-space marker for the run (so the command still parses), then
-re-flags it; focus stays on the cursor line. Two leading spaces are used rather
+re-flags it. Two leading spaces are used rather
 than a visible glyph like `* ` (a bullet list item) or a leading tab (an
 indented code block), either of which would change how the line renders as
 Markdown; two spaces leave the command text untouched. If you `Ctrl-S` save, the
@@ -233,6 +311,7 @@ always reflect whatever is actually configured, not these defaults.
 | `Ctrl-S` | Save the document to disk (any time) | `save` |
 | `F5` / `Ctrl-R` | Run the block from the cursor to the next boundary; stream output back into the doc and flag the block's first line with two leading spaces (drawn green) as executed. `Ctrl-R` is consumed only while the editor is focused, so the shell keeps `Ctrl-R` for reverse history search | `run` (`Ctrl-R` is a fixed alias, always active regardless of how `run` is bound) |
 | `Ctrl-Enter` | Also runs the block, on terminals that report the modifier (iTerm2 / kitty / …); a plain `Enter` still inserts a newline | — (fixed alias for `run`, not bindable) |
+| `Ctrl-N` / `Ctrl-P` | Jump to the next / previous runnable step. Consumed only while the editor is focused, so the shell keeps both keys for history navigation | `nextStep` / `prevStep` |
 | `F9` | Run the whole document top to bottom; output appended as one ` ```output ` block at the end | `runAll` |
 | `F8` | Cancel the running block / document run (stops the AND-chain and retries, interrupts the current command) | `cancel` |
 | `F3` | Toggle the read-only Markdown preview (dismiss with `Esc` or `F3`) | `preview` |
@@ -351,9 +430,23 @@ name: demo          ← auto-written to config/app.yml
 ```
 ````
 
-A ` ```bash ` / ` ```sh ` / ` ```zsh ` block is executed; a ` ```yaml `,
-`json`, `conf`, `ini` or `toml` block is written to the filename in the fence
-info string (or an auto-generated name if omitted).
+**The fence's language tag decides what happens** — this is the single most
+common surprise, so the full list:
+
+| Fence | What the engine does |
+|---|---|
+| ` ```bash ` ` ```sh ` ` ```zsh ` | **Executed** as one script in the shell |
+| ` ```yaml ` `json` `conf` `ini` `toml` | **Written to disk**, to the filename in the fence info string (` ```yaml config/app.yml `) or an auto-generated name |
+| ` ```output ` | The block this tool writes captured output into; also a section boundary |
+| anything else — ` ```shell `, ` ```console `, ` ```text `, or a bare ` ``` ` | **Documentation.** Not executed, not written, silently skipped |
+
+So a command that "does nothing" inside a code block is almost always a fence
+tagged something other than `bash` / `sh` / `zsh` — or a bare ` ``` `. Either
+retag the fence, or write the command as a `- ` list item.
+
+Put the cursor on the fence's **opening line** to run a fenced block with `F5`
+(`Ctrl-N` lands there for you). From inside the block there is nothing to run,
+and the status bar will say so.
 
 ### Terminal passthrough & file open
 
@@ -426,6 +519,8 @@ the resolved bindings, not the hardcoded defaults.
 | `focus` | `F2` | Switch focus between the editor and the terminal |
 | `resizeShrink` | `F6` | Shrink the terminal pane |
 | `resizeGrow` | `F7` | Grow the terminal pane |
+| `nextStep` | `Ctrl-N` | Jump to the next runnable step (editor focus only) |
+| `prevStep` | `Ctrl-P` | Jump to the previous runnable step (editor focus only) |
 
 A key spec is a function key (`F1`–`F12`), a named key (`Esc`, `Enter`, `Tab`,
 `Up`/`Down`/`Left`/`Right`, `Home`/`End`, `PgUp`/`PgDn`, `Backspace`,

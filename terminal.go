@@ -185,7 +185,10 @@ func NewTermView(app *tview.Application, dir, shellOverride string) (*TermView, 
 		rows:  rows,
 	}
 	tv.Box = tview.NewBox()
-	tv.Box.SetBorder(true).SetTitle(" terminal — " + label + " ")
+	// The title states the pane's role: on a bare split screen it is not obvious
+	// that the bottom half is where the runbook's steps actually execute. The
+	// TUI refines it with the focus-switch key once bindings are resolved.
+	tv.Box.SetBorder(true).SetTitle(" ② Terminal — " + label + " · commands run here ")
 
 	_ = p.Resize(cols, rows)
 	if err := cmd.Start(); err != nil {

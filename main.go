@@ -40,15 +40,23 @@ Run options:
   --report FILE        Write an execution report; format by extension:
                        .html, .md, .xml (JUnit) or .json
 
-The TUI is a split screen: an always-editable Markdown editor on top and a
-live OS terminal (your shell) on the bottom.
+The TUI is a split screen. How a runbook is executed:
+
+  ① Runbook (top)      put the cursor on a step and press ` + keys[actRun] + `
+  ② Terminal (bottom)  the step runs there, in a real shell
+  ③ ` + "```output" + ` block    its output is written back into the runbook
+
+A step is a "- command" line, a "1. command" line or a ` + "```bash" + ` block;
+everything else in the document is documentation.
 
 TUI shortcuts (also shown in-app with ` + keys[actHelp] + `; reassignable via
 "keybindings" in ~/.go-lc4ri/config.json):
   ` + keys[actFocus] + `           switch focus editor ⇄ terminal
   ` + keys[actSave] + `       save the document (any time)
   ` + keys[actRun] + `           run the block from the cursor to the next boundary;
-               output streams back into the doc as an output block
+               output streams back into the doc as an output block,
+               then the cursor moves on to the next step
+  ` + keys[actNextStep] + ` / ` + keys[actPrevStep] + `  jump to the next / previous step (editor only)
   ` + keys[actRunAll] + `           run the whole document top to bottom
   ` + keys[actCancel] + `           cancel a run in progress
   ` + keys[actResizeShrink] + ` / ` + keys[actResizeGrow] + `      shrink / grow the terminal pane

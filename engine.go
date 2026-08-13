@@ -499,6 +499,21 @@ type chainFrame struct {
 // as a single-child chain — both only require their real parent to have
 // succeeded, instead of an exact-depth match against a flat run count.
 func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts RunOptions) int {
+	return e.RunWith(lines, startIdx, stopAtBoundary, opts).Failures
+}
+
+// RunResult is the outcome of a run. RanAny reports whether at least one
+// command or directive was actually executed: a run that matched nothing (the
+// cursor sat in prose, or in a fenced block the engine does not execute) is not
+// a success, and callers must be able to tell the difference instead of
+// reporting an empty, silent "0 failures".
+type RunResult struct {
+	Failures int
+	RanAny   bool
+}
+
+// RunWith is Run, reporting whether anything ran (see RunResult).
+func (e *Engine) RunWith(lines []string, startIdx int, stopAtBoundary bool, opts RunOptions) RunResult {
 	e.ResetCancel()
 	failures := 0
 	ranAny := false
@@ -572,7 +587,7 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			}
 			lang := fenceLang(fb.Info)
 			switch {
-			case lang == "bash" || lang == "sh" || lang == "zsh":
+			case isExecLang(lang):
 				if e.runFencedScript(fb, opts) != 0 {
 					failures++
 				}
@@ -587,7 +602,7 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 			default:
 				// A plain output block acts as a boundary after commands ran.
 				if ranAny && stopAtBoundary {
-					return failures
+					return RunResult{Failures: failures, RanAny: ranAny}
 				}
 				i += fb.Consumed - 1
 				continue
@@ -730,7 +745,7 @@ func (e *Engine) Run(lines []string, startIdx int, stopAtBoundary bool, opts Run
 		}
 		chainRecord(depth, code == 0)
 	}
-	return failures
+	return RunResult{Failures: failures, RanAny: ranAny}
 }
 
 // FindBlockBoundary returns the line index at which an interactive run started
@@ -771,7 +786,7 @@ func FindBlockBoundary(lines []string, startIdx, tabWidth int) int {
 				continue
 			}
 			lang := fenceLang(fb.Info)
-			if lang == "bash" || lang == "sh" || lang == "zsh" || isConfigLang(lang) {
+			if isExecLang(lang) || isConfigLang(lang) {
 				seen = true
 				i += fb.Consumed - 1
 				continue

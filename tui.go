@@ -34,6 +34,11 @@ type tui struct {
 	termWeight int
 	overlay    string
 
+	// quiet suppresses status-bar refreshes while the cursor is being driven
+	// programmatically (applyDoc / moveCursorToRow synthesize one key event per
+	// row, and each would otherwise re-scan the whole document).
+	quiet bool
+
 	// F5 starts an Engine-driven run of the block from the cursor to the next
 	// boundary. Shell commands are delegated to the visible terminal and their
 	// output — plus directive markers (write:, assert:, …) — is streamed back
@@ -66,6 +71,13 @@ type runSession struct {
 	pre, post []string
 	row       int
 	committed strings.Builder // guarded by tui.capMu
+}
+
+// postStart returns the index, in the rendered document, of the first line
+// after the run's output block — i.e. where to look for the next step once the
+// block has finished.
+func (s *runSession) postStart(total int) int {
+	return total - len(s.post)
 }
 
 // reMarkerTail parses the exit status (and optional working directory) appended
@@ -106,6 +118,10 @@ const (
 	editorWeight  = 3
 	minTermWeight = 1
 	maxTermWeight = 20
+	// statusHeight is 2 rows: a context line ("what F5 runs from here") above
+	// the shortcut reminder. The context line is what makes the document →
+	// terminal → output flow discoverable without reading the manual.
+	statusHeight = 2
 )
 
 // markedEditor is the Markdown editor with one extra behaviour: after the
@@ -201,6 +217,9 @@ func (t *tui) build(content string) error {
 	if t.cwd == "" {
 		t.cwd = t.dir // commands start in the runbook's directory
 	}
+	if t.keys == nil { // defensive: run with the built-in bindings
+		t.keys, _ = resolveKeybindings(nil)
+	}
 	t.editor = &markedEditor{TextArea: tview.NewTextArea()}
 	t.editor.SetWrap(false)
 	t.editor.SetText(content, false)
@@ -215,12 +234,15 @@ func (t *tui) build(content string) error {
 		t.focusTerm = false
 		t.refreshStatus()
 	})
+	// Keep the status bar's "what will run here" line in sync with the cursor.
+	t.editor.SetMovedFunc(func() { t.refreshStatus() })
 
 	tv, err := NewTermView(t.app, t.dir, t.shellOverride())
 	if err != nil {
 		return err
 	}
 	t.term = tv
+	t.term.SetTitle(" ② Terminal — " + tv.label + " · commands run here (" + t.keyLabel(actFocus) + ": focus) ")
 	t.term.onExit = func() { t.app.Stop() } // closing the shell exits the app
 	t.term.onData = t.onTermData
 	t.term.SetFocusFunc(func() {
@@ -229,12 +251,14 @@ func (t *tui) build(content string) error {
 	})
 	t.term.Start()
 
-	t.status = tview.NewTextView().SetDynamicColors(true)
+	// Two rows: what F5 would do right now, then the shortcut reminder. Wrapping
+	// is off so a long line is clipped instead of stealing the row below it.
+	t.status = tview.NewTextView().SetDynamicColors(true).SetWrap(false)
 
 	t.body = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(t.editor, 0, editorWeight, true).
 		AddItem(t.term, 0, t.termWeight, false).
-		AddItem(t.status, 1, 0, false)
+		AddItem(t.status, statusHeight, 0, false)
 
 	t.pages = tview.NewPages().AddPage("main", t.body, true, true)
 	t.app.SetRoot(t.pages, true).EnableMouse(true)
@@ -244,12 +268,15 @@ func (t *tui) build(content string) error {
 	return nil
 }
 
+// docTitle labels the top pane with its role and the two keys that matter
+// there, so the split screen explains itself without opening the help.
 func (t *tui) docTitle() string {
 	mark := ""
 	if t.dirty {
 		mark = "*"
 	}
-	return " " + mark + filepath.Base(t.file) + " — Markdown (Ctrl-S save) "
+	return " ① Runbook — " + mark + filepath.Base(t.file) +
+		" · " + t.keyLabel(actRun) + ": run the block at the cursor · " + t.keyLabel(actSave) + ": save "
 }
 
 // onKey handles the global shortcuts, resolved from cfg.Keybindings (see
@@ -332,6 +359,20 @@ func (t *tui) onKey(ev *tcell.EventKey) *tcell.EventKey {
 		// terminal needs it for shell completion, the editor for indentation.)
 		t.toggleFocus()
 		return nil
+	case t.keys[actNextStep].matches(ev):
+		// Jump to the next / previous runnable step, so reaching a command never
+		// means scrolling line by line through the prose around it. Consumed only
+		// while the editor is focused — the shell keeps these keys (Ctrl-N /
+		// Ctrl-P are history navigation) for itself.
+		if !t.focusTerm {
+			t.jumpStep(+1)
+			return nil
+		}
+	case t.keys[actPrevStep].matches(ev):
+		if !t.focusTerm {
+			t.jumpStep(-1)
+			return nil
+		}
 	case ev.Key() == tcell.KeyUp:
 		// Fixed fallback for terminals that deliver Ctrl+Arrow. On macOS these
 		// are usually swallowed by Mission Control / App Exposé, so the
@@ -356,6 +397,94 @@ func (t *tui) toggleFocus() {
 	} else {
 		t.app.SetFocus(t.term)
 	}
+}
+
+// cursorRow returns the row the next run would start at (the selection start,
+// or the cursor when nothing is selected) — the same anchor runFromEditor uses.
+func (t *tui) cursorRow() int {
+	row, _, _, _ := t.editor.GetCursor()
+	if row < 0 {
+		return 0
+	}
+	return row
+}
+
+// moveCursorToRow drives the cursor to `row` and anchors the view a couple of
+// lines above it. The cursor is moved with synthesized arrow keys rather than a
+// byte-offset Select: a cold Select to a far offset mis-maps until the TextArea
+// has built its line layout, whereas single-row moves build it as they go (the
+// same reason applyDoc works this way).
+func (t *tui) moveCursorToRow(row int) {
+	if row < 0 {
+		row = 0
+	}
+	from := t.cursorRow()
+	key := tcell.KeyDown
+	n := row - from
+	if n < 0 {
+		key, n = tcell.KeyUp, -n
+	}
+	ih := t.editor.InputHandler()
+	noop := func(tview.Primitive) {}
+	t.quiet = true
+	for i := 0; i < n; i++ {
+		ih(tcell.NewEventKey(key, 0, tcell.ModNone), noop)
+	}
+	t.quiet = false
+
+	top := row - 2
+	if top < 0 {
+		top = 0
+	}
+	t.editor.SetOffset(top, 0)
+}
+
+// jumpStep moves the cursor to the next (dir > 0) or previous (dir < 0)
+// runnable step. Reaching a command this way costs one keystroke instead of a
+// scroll through everything between here and there.
+func (t *tui) jumpStep(dir int) {
+	lines := strings.Split(t.editor.GetText(), "\n")
+	from := t.cursorRow()
+	var (
+		row int
+		ok  bool
+	)
+	if dir > 0 {
+		row, ok = NextStepRow(lines, from, DefaultIndentSpaces)
+	} else {
+		row, ok = PrevStepRow(lines, from, DefaultIndentSpaces)
+	}
+	if !ok {
+		where := "after"
+		if dir < 0 {
+			where = "before"
+		}
+		t.flash("[grey]no runnable step " + where + " this line[-]")
+		return
+	}
+	t.app.SetFocus(t.editor)
+	t.moveCursorToRow(row)
+	t.refreshStatus()
+}
+
+// advanceAfterRun moves the cursor to the first step past the output block a
+// run has just written, so a runbook is worked through with F5 alone — no
+// scrolling between steps. It stays put when the block that ran was the last
+// one in the document.
+func (t *tui) advanceAfterRun(sess *runSession) {
+	if sess == nil || len(sess.post) == 0 {
+		return
+	}
+	lines := strings.Split(t.editor.GetText(), "\n")
+	start := sess.postStart(len(lines))
+	if start <= sess.row || start >= len(lines) {
+		return
+	}
+	row, ok := StepRowAtOrAfter(lines, start, DefaultIndentSpaces)
+	if !ok {
+		return
+	}
+	t.moveCursorToRow(row)
 }
 
 // resizeTerm grows (delta>0) or shrinks (delta<0) the terminal pane.
@@ -426,6 +555,15 @@ func (t *tui) runFromEditor() {
 
 	// The output block goes at the block boundary; drop any stale block there.
 	insertAt := FindBlockBoundary(lines, row, DefaultIndentSpaces)
+
+	// Refuse a run that would do nothing rather than marking the line green and
+	// growing an empty ```output block — the single most confusing failure mode
+	// for a newcomer, hit by putting the cursor in prose or *inside* a fenced
+	// block instead of on its opening ``` line.
+	if !HasRunnableStep(lines, row, insertAt, DefaultIndentSpaces) {
+		t.flash(t.noStepHint())
+		return
+	}
 	lines, insertAt = removeOutputBlockAt(lines, insertAt)
 	pre := append([]string{}, lines[:insertAt]...)
 	post := append([]string{}, lines[insertAt:]...)
@@ -476,6 +614,10 @@ func (t *tui) runAll() {
 	}
 
 	clean := stripRunArtifacts(strings.Split(t.editor.GetText(), "\n"))
+	if !HasRunnableStep(clean, 0, -1, DefaultIndentSpaces) {
+		t.flash(t.noStepHint())
+		return
+	}
 	// Drop trailing blank lines, then leave exactly one before the output block.
 	for len(clean) > 0 && strings.TrimSpace(clean[len(clean)-1]) == "" {
 		clean = clean[:len(clean)-1]
@@ -574,7 +716,7 @@ func (t *tui) runEngine(lines []string, startIdx int, sess *runSession, stopAtBo
 		Prompt:      t.askPrompt,
 		ConfirmRun:  t.askConfirm,
 	}
-	eng.Run(lines, startIdx, stopAtBoundary, opts)
+	res := eng.RunWith(lines, startIdx, stopAtBoundary, opts)
 
 	t.capMu.Lock()
 	t.running = false
@@ -583,8 +725,41 @@ func (t *tui) runEngine(lines []string, startIdx int, sess *runSession, stopAtBo
 	t.capMu.Unlock()
 	t.app.QueueUpdateDraw(func() {
 		t.renderDoc()
+		if !res.RanAny {
+			// The pre-flight check in runFromEditor makes this rare (a block of
+			// nothing but "# env:" lines, say) — but never leave a run that did
+			// nothing looking like one that succeeded.
+			t.undoDoneMarker(sess)
+			t.flash(t.noStepHint())
+			return
+		}
+		t.advanceAfterRun(sess)
 		t.refreshStatus()
 	})
+}
+
+// noStepHint is the message shown when a run would execute nothing: it names
+// the three forms that are runnable and the key that jumps to the nearest one.
+func (t *tui) noStepHint() string {
+	// Kept under 80 columns: the shortcut row below already names the
+	// jump-to-next-step key, so the message spends its width on the three
+	// forms that are runnable.
+	return "[yellow]nothing to run here[-] [grey]— a step is[-] [white]- command[-][grey],[-] [white]1. command[-]" +
+		"[grey] or a[-] [white]```bash[-] [grey]block[-]"
+}
+
+// undoDoneMarker clears the executed flag runFromEditor optimistically placed on
+// the block's first line, for a run that turned out to execute nothing.
+func (t *tui) undoDoneMarker(sess *runSession) {
+	if sess == nil {
+		return
+	}
+	mi := firstNonBlank(sess.pre, sess.row, len(sess.pre))
+	if mi < 0 || !strings.HasPrefix(sess.pre[mi], doneMarker) {
+		return
+	}
+	sess.pre[mi] = stripDoneMarker(sess.pre[mi])
+	t.applyDoc(sess.pre, nil, sess.post, sess.row)
 }
 
 // execInTerminal implements RunOptions.ExecCommand: it brackets cmd with marker
@@ -788,8 +963,15 @@ func (t *tui) renderDoc() {
 	pre, post, row := t.sess.pre, t.sess.post, t.sess.row
 	t.capMu.Unlock()
 
-	full = dropSentinelLines(full)
-	t.applyDoc(pre, buildOutputBlock(strings.TrimRight(full, "\n")), post, row)
+	full = strings.TrimRight(dropSentinelLines(full), "\n")
+	if full == "" {
+		// Nothing has been captured (yet): leave the document alone rather than
+		// planting an empty ```output block, which is all a run that matches no
+		// command would otherwise produce.
+		t.applyDoc(pre, nil, post, row)
+		return
+	}
+	t.applyDoc(pre, buildOutputBlock(full), post, row)
 }
 
 // editorChunk returns the active selection, or the line under the cursor.
@@ -869,9 +1051,11 @@ func (t *tui) applyDoc(pre, block, post []string, row int) {
 
 	ih := t.editor.InputHandler()
 	noop := func(tview.Primitive) {}
+	t.quiet = true // one cursor-moved callback per row would rescan the document
 	for i := 0; i < row; i++ {
 		ih(tcell.NewEventKey(tcell.KeyDown, 0, tcell.ModNone), noop)
 	}
+	t.quiet = false
 
 	// Re-anchor the view so the executed line (and the output growing beneath
 	// it) stays visible instead of snapping back to the top.
@@ -1025,31 +1209,67 @@ func (t *tui) keyLabel(action string) string {
 	return "?"
 }
 
-func (t *tui) refreshStatus() {
-	focus := "[aqua]editor[-]"
-	if t.focusTerm {
-		focus = "[lime]terminal[-]"
-	}
-	state := ""
-	if t.dirty {
-		state += " [yellow]*unsaved[-]"
-	}
+// cursorContext is the status bar's first line: what pressing the run key right
+// now would do. It answers the question a newcomer actually has in front of the
+// split screen — "which of these lines is about to run?" — at the cost of one
+// document scan per cursor move.
+func (t *tui) cursorContext() string {
 	t.capMu.Lock()
 	running := t.running
 	t.capMu.Unlock()
 	if running {
-		state += fmt.Sprintf(" [yellow]running…[-] [grey](%s:cancel)[-]", t.keyLabel(actCancel))
+		return fmt.Sprintf(" [yellow]▶ running…[-] [grey]— output is streaming into the ```output block ([-]%s[grey]: cancel)[-]",
+			t.keyLabel(actCancel))
 	}
-	t.status.SetText(fmt.Sprintf(
-		" focus:%s%s   [grey]%s[-]:switch [grey]%s[-]:save [grey]%s[-]:run [grey]%s[-]:run-all [grey]%s[-]:preview [grey]%s/%s[-]:resize [grey]%s[-]:help [grey]%s[-]:quit",
-		focus, state,
-		t.keyLabel(actFocus), t.keyLabel(actSave), t.keyLabel(actRun), t.keyLabel(actRunAll), t.keyLabel(actPreview),
-		t.keyLabel(actResizeShrink), t.keyLabel(actResizeGrow), t.keyLabel(actHelp), t.keyLabel(actQuit)))
+	if t.focusTerm {
+		return fmt.Sprintf(" [lime]▶ terminal[-] [grey]— keys go to the shell ([-]%s[grey]: back to the runbook)[-]",
+			t.keyLabel(actFocus))
+	}
+	lines := strings.Split(t.editor.GetText(), "\n")
+	row := t.cursorRow()
+	to := FindBlockBoundary(lines, row, DefaultIndentSpaces)
+	step, ok := FirstStepIn(lines, row, to, DefaultIndentSpaces)
+	if !ok {
+		return " [yellow]▶ " + t.keyLabel(actRun) + ": nothing to run at the cursor[-] [grey]— " +
+			t.keyLabel(actNextStep) + " jumps to the next step[-]"
+	}
+	kind := "runs"
+	if step.Done {
+		kind = "re-runs"
+	}
+	return fmt.Sprintf(" [aqua]▶ %s %s:[-] [white]%s[-] [grey]→ output to the ```output block[-]",
+		t.keyLabel(actRun), kind, tview.Escape(truncateRunes(step.Text, 36)))
 }
 
-// flash writes a transient message to the status bar (until the next refresh).
+func (t *tui) refreshStatus() {
+	if t.quiet {
+		return
+	}
+	state := ""
+	if t.dirty {
+		state = "[yellow]*unsaved[-]  "
+	}
+	// Focus and the running indicator live on the context row, so the shortcut
+	// row carries only the keys — it needs every column it can get.
+	t.status.SetText(t.cursorContext() + "\n " + state + t.keyLine())
+}
+
+// keyLine is the status bar's second row: the shortcut reminder, which stays
+// put even while the first row carries a transient message. The keys are
+// ordered by how much a newcomer needs them, because on a narrow terminal the
+// tail of the line is the part that gets clipped.
+func (t *tui) keyLine() string {
+	return fmt.Sprintf(
+		"[grey]%s[-]:help [grey]%s[-]:run [grey]%s/%s[-]:step [grey]%s[-]:save [grey]%s[-]:switch [grey]%s[-]:run-all [grey]%s[-]:cancel [grey]%s[-]:preview [grey]%s/%s[-]:resize [grey]%s[-]:quit",
+		t.keyLabel(actHelp), t.keyLabel(actRun), t.keyLabel(actNextStep), t.keyLabel(actPrevStep),
+		t.keyLabel(actSave), t.keyLabel(actFocus), t.keyLabel(actRunAll), t.keyLabel(actCancel),
+		t.keyLabel(actPreview), t.keyLabel(actResizeShrink), t.keyLabel(actResizeGrow), t.keyLabel(actQuit))
+}
+
+// flash writes a transient message to the status bar's first row (until the
+// next refresh), keeping the shortcut reminder visible underneath.
 func (t *tui) flash(msg string) {
-	t.status.SetText(" " + msg)
+	t.status.SetText(" " + msg + "\n " + t.keyLine())
 }
 
 // =========================================================================
@@ -1102,6 +1322,15 @@ func (t *tui) showHelp() {
 	help := tview.NewTextView().SetDynamicColors(true)
 	help.SetBorder(true).SetTitle(" Keyboard Shortcuts (Esc / " + t.keyLabel(actHelp) + " to close) ")
 	tmpl := `
+  [aqua::b]How it works[-:-:-]
+    ① the [white]runbook[-] (top) holds your steps — put the cursor on one
+       and press [yellow]%RUN%[-]
+    ② the step runs in the [white]terminal[-] (bottom), a real shell
+    ③ its output is written back into the runbook as an
+       ` + "```output" + ` block, right under the step
+    Only [white]- command[-], [white]1. command[-] and ` + "```bash" + ` blocks are steps;
+    everything else is documentation. [yellow]%NEXTSTEP%[-] jumps to the next one.
+
   [aqua::b]Layout[-:-:-]
     [yellow]%FOCUS%[-]           switch focus: editor ⇄ terminal
     [yellow]%SHRINK% / %GROW%[-]      shrink / grow the terminal pane
@@ -1125,6 +1354,11 @@ func (t *tui) showHelp() {
                   if you re-run that block.
                   ([yellow]Ctrl-Enter[-] also runs, on terminals that
                   report the modifier — iTerm2 / kitty / …)
+                  When the run finishes the cursor moves on to the
+                  next step by itself, so a runbook is worked through
+                  with [yellow]%RUN%[-] alone — no scrolling in between.
+    [yellow]%NEXTSTEP%[-] / [yellow]%PREVSTEP%[-]  jump to the next / previous runnable step
+                  (editor only — the shell keeps these keys)
     [yellow]%RUNALL%[-]           run the whole document top to bottom, output
                   appended as one ` + "```output" + ` block at the end
     [yellow]%CANCEL%[-]           cancel the running block (stops the chain /
@@ -1158,9 +1392,11 @@ func (t *tui) showHelp() {
 		"%PREVIEW%", t.keyLabel(actPreview),
 		"%HELP%", t.keyLabel(actHelp),
 		"%QUIT%", t.keyLabel(actQuit),
+		"%NEXTSTEP%", t.keyLabel(actNextStep),
+		"%PREVSTEP%", t.keyLabel(actPrevStep),
 	)
 	help.SetText(replacer.Replace(tmpl))
 	t.overlay = "help"
-	t.pages.AddPage("help", t.modalWrap(help, 64, 30), true, true)
+	t.pages.AddPage("help", t.modalWrap(help, 68, 40), true, true)
 	t.app.SetFocus(help)
 }

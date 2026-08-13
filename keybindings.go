@@ -22,10 +22,12 @@ const (
 	actFocus        = "focus"
 	actResizeShrink = "resizeShrink"
 	actResizeGrow   = "resizeGrow"
+	actNextStep     = "nextStep"
+	actPrevStep     = "prevStep"
 )
 
 // actionOrder lists the bindable actions in the order they are documented.
-var actionOrder = []string{actQuit, actHelp, actPreview, actSave, actRun, actRunAll, actCancel, actFocus, actResizeShrink, actResizeGrow}
+var actionOrder = []string{actQuit, actHelp, actPreview, actSave, actRun, actRunAll, actCancel, actFocus, actResizeShrink, actResizeGrow, actNextStep, actPrevStep}
 
 // defaultKeybindings mirrors the shortcuts this CLI shipped with before
 // keybindings became configurable.
@@ -41,6 +43,10 @@ func defaultKeybindings() map[string]string {
 		actFocus:        "F2",
 		actResizeShrink: "F6",
 		actResizeGrow:   "F7",
+		// Step navigation is only consumed while the editor has focus, so the
+		// shell keeps Ctrl-N / Ctrl-P (history) for itself — see onKey.
+		actNextStep: "Ctrl-N",
+		actPrevStep: "Ctrl-P",
 	}
 }
 
